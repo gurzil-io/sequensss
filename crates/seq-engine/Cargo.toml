@@ -1,0 +1,9 @@
+[package]
+name = "seq-engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+seq-model.workspace = true
+rtrb.workspace = true

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.1"
+license = "MIT"
+
+[workspace.dependencies]
+seq-i18n = { path = "crates/seq-i18n" }
+seq-model = { path = "crates/seq-model" }
+seq-edit = { path = "crates/seq-edit" }
+seq-engine = { path = "crates/seq-engine" }
+seq-io = { path = "crates/seq-io" }
+seq-ui = { path = "crates/seq-ui" }
+
+serde = { version = "1.0.210", features = ["derive"] }
+ron = "0.8.1"
+rtrb = "0.3.1"
+cpal = "0.15.3"
+midir = "0.10.1"
+hound = "3.5.1"
+midly = "0.5.3"
+eframe = "0.29.1"
+rfd = "0.15.1"
+thiserror = "1.0.64"
+anyhow = "1.0.89"
+
+# Optimize dependencies even in debug builds, otherwise the audio crackles.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

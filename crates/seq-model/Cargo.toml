@@ -1,0 +1,12 @@
+[package]
+name = "seq-model"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+seq-i18n.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+ron.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "seq-edit"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+seq-i18n.workspace = true
+seq-model.workspace = true

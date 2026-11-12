@@ -1,0 +1,26 @@
+[package]
+name = "seq-io"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+seq-i18n.workspace = true
+seq-model.workspace = true
+seq-engine.workspace = true
+hound.workspace = true
+midly.workspace = true
+ron.workspace = true
+rtrb.workspace = true
+
+# midir has no Android backend: Android MIDI goes through JNI/AMidi (see midi_android.rs).
+[target.'cfg(not(target_os = "android"))'.dependencies]
+midir.workspace = true
+cpal.workspace = true
+
+# Android audio: oboe used directly (low-latency mode), see audio_android.rs.
+[target.'cfg(target_os = "android")'.dependencies]
+oboe = "0.6.1"
+# Android MIDI: JNI bridge to MidiBridge.kt (see midi_android.rs)
+jni = "0.21"
+ndk-context = "0.1"

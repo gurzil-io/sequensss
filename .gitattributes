@@ -1,0 +1,3 @@
+* text=auto
+# Run under WSL: must stay LF.
+*.sh text eol=lf
