@@ -17,6 +17,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use seq_model::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayMode {
@@ -71,6 +72,9 @@ pub enum Garbage {
 pub struct MidiInMsg {
     pub bytes: [u8; 3],
     pub len: u8,
+    /// When the message was received. Recording places the note where it was played,
+    /// not at the start of the buffer that picks it up. `None` = now.
+    pub time: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -298,13 +302,18 @@ impl Engine {
 
     /// Audio callback. `out` is interleaved with `channels` channels.
     pub fn process(&mut self, out: &mut [f32], channels: usize, latency_secs: f64) {
+        self.process_at(out, channels, latency_secs, Instant::now());
+    }
+
+    /// `process` with the current time given (tests).
+    pub fn process_at(&mut self, out: &mut [f32], channels: usize, latency_secs: f64, now: Instant) {
         let channels = channels.max(1);
         self.latency = latency_secs;
         self.cb_frame = 0;
         while let Ok(cmd) = self.cmds.pop() {
             self.handle_cmd(cmd);
         }
-        self.drain_midi_in();
+        self.drain_midi_in(now);
 
         let total = out.len() / channels;
         let mut done = 0;
@@ -480,6 +489,19 @@ impl Engine {
                 if p <= 0.0 { l0 } else { l0 + (u - l1) % p }
             }
             _ => u,
+        }
+    }
+
+    /// Song position `ticks` before the current one (while playing), wrapped back into a
+    /// looping region.
+    fn position_ago(&self, ticks: f64) -> f64 {
+        let p = self.song_at(self.frames as f64 / self.spt - ticks);
+        match self.region() {
+            Some((l0, l1)) if p < l0 && l1 > l0 && !self.one_shot => {
+                let r = (l0 - p) % (l1 - l0);
+                if r == 0.0 { l0 } else { l1 - r }
+            }
+            _ => p.max(0.0),
         }
     }
 
@@ -794,7 +816,7 @@ impl Engine {
         self.remove_active_where(0, |a| a.live && a.slot as usize == si && a.key == key);
     }
 
-    fn drain_midi_in(&mut self) {
+    fn drain_midi_in(&mut self, now: Instant) {
         loop {
             let Some(m) = self.midi_in.as_mut().and_then(|rx| rx.pop().ok()) else { break };
             if m.len < 3 {
@@ -811,8 +833,12 @@ impl Engine {
             let Some(si) = self.slot_index(ch) else { continue };
             if on { self.live_on(si, key, vel) } else { self.live_off(si, key) }
             if self.recording && self.playing {
-                let tick = self.position();
-                let time = self.clock as f64 / self.spt;
+                // The key was struck `age` ago, along with what was heard then: the audio
+                // rendered `latency` before it reached the speakers.
+                let age = m.time.map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f64());
+                let ago = (age + self.latency) * self.sr / self.spt;
+                let tick = self.position_ago(ago);
+                let time = self.clock as f64 / self.spt - ago;
                 let _ = self.events.push(EngineEvent::Recorded { channel: ch, key, vel, tick, time, on });
             }
         }
@@ -1510,7 +1536,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     fn midi(on: bool, key: u8, vel: u8) -> MidiInMsg {
-        MidiInMsg { bytes: [if on { 0x90 } else { 0x80 }, key, vel], len: 3 }
+        MidiInMsg { bytes: [if on { 0x90 } else { 0x80 }, key, vel], len: 3, time: None }
     }
 
     /// Engine (stopped) with a MIDI input and a probe on `ch`.
@@ -1543,7 +1569,7 @@ mod tests {
         run(&mut e, 256, &[256]);
         tx.push(midi(true, 64, 90)).unwrap();
         // Note-on with velocity 0 = note-off.
-        tx.push(MidiInMsg { bytes: [0x90, 60, 0], len: 3 }).unwrap();
+        tx.push(MidiInMsg { bytes: [0x90, 60, 0], len: 3, time: None }).unwrap();
         run(&mut e, 256, &[256]);
         tx.push(midi(false, 64, 0)).unwrap();
         run(&mut e, 256, &[256]);
@@ -1571,8 +1597,8 @@ mod tests {
         assert!(log.lock().unwrap().is_empty());
         // Non-note messages and short messages are ignored on a valid live channel.
         e.handle_cmd(EngineCmd::SetLiveChannel(Some(ch)));
-        tx.push(MidiInMsg { bytes: [0xB0, 1, 64], len: 3 }).unwrap();
-        tx.push(MidiInMsg { bytes: [0x90, 60, 100], len: 2 }).unwrap();
+        tx.push(MidiInMsg { bytes: [0xB0, 1, 64], len: 3, time: None }).unwrap();
+        tx.push(MidiInMsg { bytes: [0x90, 60, 100], len: 2, time: None }).unwrap();
         run(&mut e, 256, &[256]);
         assert!(log.lock().unwrap().is_empty());
     }
@@ -1616,6 +1642,34 @@ mod tests {
         tx.push(midi(false, 60, 0)).unwrap();
         run(&mut e, 100, &[100]);
         assert_eq!(recorded(&mut h), vec![(ch, 60, 100, 960.0, true), (ch, 60, 0, 0.0, false)]);
+    }
+
+    #[test]
+    fn recorded_note_placed_when_played() {
+        // 120 BPM: 1920 ticks/s. 1 s into the pattern, a note received 10 ms before the
+        // callback, with 50 ms of output latency: played 60 ms ago = 115.2 ticks earlier.
+        let (p, ch, _) = project_with_steps(&[], 16);
+        let (mut e, mut h, _log, mut tx) = midi_in_engine(&p, ch);
+        e.handle_cmd(EngineCmd::SetLiveChannel(Some(ch)));
+        e.handle_cmd(EngineCmd::SetRecording(true));
+        e.handle_cmd(EngineCmd::Play);
+        run(&mut e, 48_000, &[500]);
+        let now = Instant::now();
+        let at = Some(now - std::time::Duration::from_millis(10));
+        tx.push(MidiInMsg { bytes: [0x90, 60, 100], len: 3, time: at }).unwrap();
+        let mut buf = vec![0.0; 1000];
+        e.process_at(&mut buf, 2, 0.05, now);
+        let r = recorded(&mut h);
+        assert_eq!(r.len(), 1);
+        assert!((r[0].3 - (1920.0 - 115.2)).abs() < 0.01, "{r:?}");
+
+        // Played just before the loop restarted: wrapped back to the end of the pattern.
+        run(&mut e, 96_000 - 48_000 - 500 + 24, &[500]); // 1 ms into the next loop
+        tx.push(MidiInMsg { bytes: [0x80, 60, 0], len: 3, time: Some(Instant::now()) }).unwrap();
+        e.process_at(&mut buf, 2, 0.01, Instant::now());
+        let r = recorded(&mut h);
+        assert_eq!(r.len(), 1);
+        assert!(r[0].3 > 3800.0 && r[0].3 < 3840.0, "{r:?}");
     }
 
     #[test]

@@ -66,6 +66,29 @@ pub fn flatten_channel(p: &Project, channel: ChannelId, fallback: PatternId) -> 
     out
 }
 
+/// Notes sorted by start. A note still sounding when the same key starts again ends there
+/// (a MIDI synth would cut it anyway, and on/on/off/off would cut the second one short).
+/// Two notes starting together on the same key keep the longest.
+fn without_overlaps(notes: Vec<AbsNote>) -> Vec<AbsNote> {
+    let mut out: Vec<AbsNote> = Vec::with_capacity(notes.len());
+    let mut last: [Option<usize>; 128] = [None; 128];
+    for n in notes {
+        let k = n.key as usize;
+        if let Some(i) = last[k] {
+            let prev = &mut out[i];
+            if prev.start == n.start {
+                prev.end = prev.end.max(n.end);
+                prev.vel = prev.vel.max(n.vel);
+                continue;
+            }
+            prev.end = prev.end.min(n.start);
+        }
+        last[k] = Some(out.len());
+        out.push(n);
+    }
+    out
+}
+
 pub fn write_midi(path: &Path, p: &Project, fallback: PatternId) -> Result<()> {
     let mut smf = Smf::new(Header::new(Format::Parallel, Timing::Metrical(u15::new(PPQ as u16))));
 
@@ -83,10 +106,13 @@ pub fn write_midi(path: &Path, p: &Project, fallback: PatternId) -> Result<()> {
         TrackEvent { delta: u28::new(0), kind: TrackEventKind::Meta(MetaMessage::EndOfTrack) },
     ]);
 
+    // What is heard: muted channels, and channels silenced by a solo, are left out.
+    let any_solo = p.channels.iter().any(|c| c.solo);
     let tracks: Vec<(&Channel, Vec<AbsNote>)> = p
         .channels
         .iter()
-        .map(|ch| (ch, flatten_channel(p, ch.id, fallback)))
+        .filter(|ch| !ch.mute && (!any_solo || ch.solo))
+        .map(|ch| (ch, without_overlaps(flatten_channel(p, ch.id, fallback))))
         .filter(|(_, notes)| !notes.is_empty())
         .collect();
     // Synths take the channels left free by the drums (10) and the MIDI out tracks, in
@@ -461,6 +487,66 @@ mod tests {
         p.arrangement.clips.push(Clip { pattern: PatternId(999), track: 0, start: 0, len: p.bar_len() });
         p.arrangement.clips.push(Clip { pattern: pat, track: 1, start: 0, len: 0 });
         assert_eq!(flatten_channel(&p, kick, pat), pattern_only);
+    }
+
+    fn notes_of(p: &Project, path: &Path) -> Vec<Vec<(u64, bool, u8)>> {
+        write_midi(path, p, p.patterns[0].id).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        let smf = Smf::parse(&bytes).unwrap();
+        smf.tracks[1..]
+            .iter()
+            .map(|t| {
+                let mut at = 0u64;
+                let mut v = Vec::new();
+                for e in t {
+                    at += e.delta.as_int() as u64;
+                    match e.kind {
+                        TrackEventKind::Midi { message: MidiMessage::NoteOn { key, .. }, .. } => v.push((at, true, key.as_int())),
+                        TrackEventKind::Midi { message: MidiMessage::NoteOff { key, .. }, .. } => v.push((at, false, key.as_int())),
+                        _ => {}
+                    }
+                }
+                v
+            })
+            .collect()
+    }
+
+    #[test]
+    fn midi_overlapping_notes_on_same_key_do_not_cut_each_other() {
+        let dir = std::env::temp_dir().join("sequensss-test-mid-overlap");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut p = Project::empty();
+        let pat = p.patterns[0].id;
+        let ch = p.add_channel("s", ChannelKind::Synth(SynthParams::default())).unwrap();
+        let n = |start, len| Note { start, len, key: 60, velocity: 100 };
+        // 0..960 overlaps 480..1440; two identical starts at 1920 (lengths 240 and 480).
+        p.pattern_mut(pat).unwrap().notes.insert(ch, vec![n(0, 960), n(480, 960), n(1920, 240), n(1920, 480)]);
+        let tracks = notes_of(&p, &dir.join("o.mid"));
+        assert_eq!(
+            tracks[0],
+            vec![(0, true, 60), (480, false, 60), (480, true, 60), (1440, false, 60), (1920, true, 60), (2400, false, 60)]
+        );
+    }
+
+    #[test]
+    fn midi_export_leaves_out_muted_and_unsoloed_channels() {
+        let dir = std::env::temp_dir().join("sequensss-test-mid-mute");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut p = Project::empty();
+        let pat = p.patterns[0].id;
+        let ids: Vec<ChannelId> = (0..3).map(|_| p.add_channel("s", ChannelKind::Synth(SynthParams::default())).unwrap()).collect();
+        for (i, &id) in ids.iter().enumerate() {
+            let key = 60 + i as u8;
+            p.pattern_mut(pat).unwrap().notes.insert(id, vec![Note { start: 0, len: 480, key, velocity: 100 }]);
+        }
+        let keys = |p: &Project, name: &str| -> Vec<u8> {
+            notes_of(p, &dir.join(name)).iter().map(|t| t[0].2).collect()
+        };
+        assert_eq!(keys(&p, "all.mid"), vec![60, 61, 62]);
+        p.channel_mut(ids[0]).unwrap().mute = true;
+        assert_eq!(keys(&p, "mute.mid"), vec![61, 62]);
+        p.channel_mut(ids[2]).unwrap().solo = true;
+        assert_eq!(keys(&p, "solo.mid"), vec![62]);
     }
 
     #[test]

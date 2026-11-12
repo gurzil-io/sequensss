@@ -45,7 +45,7 @@ fn push_in(tx: &MidiInTx, msg: &[u8]) {
     let mut bytes = [0u8; 3];
     bytes[..msg.len()].copy_from_slice(msg);
     if let Ok(mut tx) = tx.lock() {
-        let _ = tx.push(MidiInMsg { bytes, len: msg.len() as u8 });
+        let _ = tx.push(MidiInMsg { bytes, len: msg.len() as u8, time: Some(std::time::Instant::now()) });
     }
 }
 
