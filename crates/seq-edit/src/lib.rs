@@ -6,6 +6,11 @@
 
 use seq_model::*;
 
+mod record;
+mod sync;
+pub use record::{RecordedNote, Recorder};
+pub use sync::{SlotUpdate, exports_song, slot_updates};
+
 pub struct History {
     committed: Project,
     undo: Vec<Project>,

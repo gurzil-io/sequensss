@@ -292,6 +292,12 @@ impl Project {
         self.channels.iter_mut().find(|c| c.id == id)
     }
 
+    /// Whether the playlist has a clip that plays something: a non-zero length and an
+    /// existing pattern. Otherwise playback and export fall back to the current pattern.
+    pub fn has_song(&self) -> bool {
+        self.arrangement.clips.iter().any(|c| c.len > 0 && self.pattern(c.pattern).is_some())
+    }
+
     pub fn pattern(&self, id: PatternId) -> Option<&Pattern> {
         self.patterns.iter().find(|p| p.id == id)
     }

@@ -10,7 +10,7 @@ pub use files::Files;
 
 use eframe::egui;
 use rtrb::RingBuffer;
-use seq_edit::History;
+use seq_edit::{History, Recorder, SlotUpdate};
 use seq_engine::{Engine, EngineCmd, EngineEvent, EngineHandle, MidiInMsg, MidiOutMsg, PlayMode, compile, offline};
 use seq_io::audio::{self, AudioOut};
 use seq_io::instruments::{SampleCache, build_slot};
@@ -19,7 +19,7 @@ use seq_io::{export, project_file};
 use seq_i18n::{tr, trf};
 use seq_model::*;
 use seq_ui::{PlaybackInfo, SeqUi, UiAction};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -67,7 +67,7 @@ struct App {
 
     levels: HashMap<ChannelId, (f32, f32)>,
     master: (f32, f32),
-    rec_pending: HashMap<(ChannelId, u8), (f64, u8)>,
+    recorder: Recorder,
     confirm: Option<Pending>,
     title: String,
     files: Files,
@@ -118,7 +118,7 @@ impl App {
             midi_gen: 0,
             levels: HashMap::new(),
             master: (0.0, 0.0),
-            rec_pending: HashMap::new(),
+            recorder: Recorder::default(),
             confirm: None,
             title: String::new(),
             files,
@@ -221,28 +221,29 @@ impl App {
         let Some(h) = self.handle.as_mut() else { return };
 
         // Instruments
-        let ids: HashSet<ChannelId> = self.project.channels.iter().map(|c| c.id).collect();
-        let removed: Vec<ChannelId> = self.sent_kinds.keys().filter(|id| !ids.contains(id)).copied().collect();
-        for id in removed {
-            h.send(EngineCmd::RemoveSlot(id));
-            self.sent_kinds.remove(&id);
-        }
-        for ch in self.project.channels.iter().take(MAX_CHANNELS) {
-            let prev = self.sent_kinds.get(&ch.id);
-            if prev == Some(&ch.kind) {
-                continue;
-            }
-            if let (Some(ChannelKind::Synth(_)), ChannelKind::Synth(p)) = (prev, &ch.kind) {
-                h.send(EngineCmd::SetSynthParams(ch.id, *p));
-            } else {
+        for u in seq_edit::slot_updates(&self.sent_kinds, &self.project.channels) {
+            let id = match u {
+                SlotUpdate::Remove(id) => {
+                    h.send(EngineCmd::RemoveSlot(id));
+                    self.sent_kinds.remove(&id);
+                    continue;
+                }
+                SlotUpdate::SynthParams(id, p) => {
+                    h.send(EngineCmd::SetSynthParams(id, p));
+                    id
+                }
+                SlotUpdate::Rebuild(id) => id,
+            };
+            let Some(ch) = self.project.channel(id) else { continue };
+            if matches!(u, SlotUpdate::Rebuild(_)) {
                 match build_slot(ch, self.sample_rate, &mut self.cache) {
                     Ok(kind) => {
-                        h.send(EngineCmd::SetSlot(ch.id, kind));
+                        h.send(EngineCmd::SetSlot(id, kind));
                     }
                     Err(e) => self.ui.status = trf!("{} : {e}", "{}: {e}", ch.name),
                 }
             }
-            self.sent_kinds.insert(ch.id, ch.kind.clone());
+            self.sent_kinds.insert(id, ch.kind.clone());
         }
 
         // Graph
@@ -256,7 +257,7 @@ impl App {
         if self.sent_mode != Some(mode) {
             h.send(EngineCmd::SetMode(mode));
             self.sent_mode = Some(mode);
-            self.rec_pending.clear();
+            self.recorder.clear();
         }
         if self.sent_loop != Some(self.ui.loop_region) {
             h.send(EngineCmd::SetLoop(self.ui.loop_region));
@@ -269,10 +270,12 @@ impl App {
         if self.sent_recording != Some(self.ui.recording) {
             h.send(EngineCmd::SetRecording(self.ui.recording));
             self.sent_recording = Some(self.ui.recording);
-            self.rec_pending.clear();
+            self.recorder.clear();
         }
         if self.sent_live != Some(self.ui.channel) {
             h.send(EngineCmd::SetLiveChannel(self.ui.channel));
+            // The engine releases the held notes: their note-offs will not be recorded.
+            self.recorder.clear();
             self.sent_live = Some(self.ui.channel);
         }
     }
@@ -286,13 +289,13 @@ impl App {
                         self.levels.insert(channel, (peak_l, peak_r));
                     }
                     EngineEvent::Master { peak_l, peak_r } => self.master = (peak_l, peak_r),
-                    EngineEvent::Recorded { channel, key, vel, tick, on } => recorded.push((channel, key, vel, tick, on)),
+                    EngineEvent::Recorded { channel, key, vel, tick, time, on } => recorded.push((channel, key, vel, tick, time, on)),
                 }
             }
             h.collect_garbage();
         }
-        for (channel, key, vel, tick, on) in recorded {
-            self.on_recorded(channel, key, vel, tick, on);
+        for (channel, key, vel, tick, time, on) in recorded {
+            self.on_recorded(channel, key, vel, tick, time, on);
         }
         let new_errors = self.audio.as_ref().map(|a| a.error_count()).filter(|&n| n > self.audio_errors_seen);
         if let Some(n) = new_errors {
@@ -349,29 +352,14 @@ impl App {
     }
 
     /// Note recorded from MIDI in (Pattern mode only).
-    fn on_recorded(&mut self, channel: ChannelId, key: u8, vel: u8, tick: f64, on: bool) {
+    fn on_recorded(&mut self, channel: ChannelId, key: u8, vel: u8, tick: f64, time: f64, on: bool) {
         if self.ui.song_mode || !self.ui.recording {
             return;
         }
-        if on {
-            self.rec_pending.insert((channel, key), (tick, vel));
-            return;
-        }
-        let Some((start, vel)) = self.rec_pending.remove(&(channel, key)) else { return };
-        let pat_id = self.ui.pattern;
+        let Some(rec) = self.recorder.event(channel, key, vel, tick, time, on) else { return };
         let quantize = self.ui.quantize;
-        let Some(pat) = self.project.pattern_mut(pat_id) else { return };
-        let plen = pat.length.max(1);
-        let raw_start = start.max(0.0) as Tick % plen;
-        let end = tick.max(0.0) as Tick % plen;
-        let mut len = if end >= raw_start { end - raw_start } else { plen - raw_start + end };
-        let mut s = raw_start;
-        if quantize {
-            s = seq_edit::snap_round(raw_start, STEP) % plen;
-            len = seq_edit::snap_round(len, STEP).max(STEP);
-        }
-        len = len.clamp(STEP / 4, plen);
-        pat.notes.entry(channel).or_default().push(Note { start: s, len, key, velocity: vel.max(1) });
+        let Some(pat) = self.project.pattern_mut(self.ui.pattern) else { return };
+        pat.notes.entry(rec.channel).or_default().push(rec.to_note(pat.length, quantize));
     }
 
     // ------------------------------------------------------------------
@@ -394,7 +382,7 @@ impl App {
         self.history.reset(&self.project);
         self.file = file;
         self.ui.reset_for(&self.project);
-        self.rec_pending.clear();
+        self.recorder.clear();
         self.levels.clear();
         self.update_file_label();
     }
@@ -453,7 +441,7 @@ impl App {
     }
 
     fn export_mode(&self) -> PlayMode {
-        if self.project.arrangement.clips.is_empty() { PlayMode::Pattern(self.ui.pattern) } else { PlayMode::Song }
+        if seq_edit::exports_song(&self.project) { PlayMode::Song } else { PlayMode::Pattern(self.ui.pattern) }
     }
 
     #[cfg(not(target_os = "android"))]
@@ -556,7 +544,7 @@ impl App {
             }
             UiAction::Stop => {
                 self.send(EngineCmd::Stop);
-                self.rec_pending.clear();
+                self.recorder.clear();
             }
             UiAction::Seek(t) => self.send(EngineCmd::Seek(t as f64)),
             UiAction::Preview { channel, key, vel, on } => self.send(EngineCmd::Preview { channel, key, vel, on }),
