@@ -3134,7 +3134,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "seq-android"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "android_logger",
  "eframe",
@@ -3145,7 +3145,7 @@ dependencies = [
 
 [[package]]
 name = "seq-edit"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "seq-i18n",
  "seq-model",
@@ -3153,7 +3153,7 @@ dependencies = [
 
 [[package]]
 name = "seq-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "rtrb",
  "seq-model",
@@ -3161,11 +3161,11 @@ dependencies = [
 
 [[package]]
 name = "seq-i18n"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "seq-io"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cpal",
  "hound",
@@ -3183,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "seq-model"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ron",
  "seq-i18n",
@@ -3192,7 +3192,7 @@ dependencies = [
 
 [[package]]
 name = "seq-ui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eframe",
  "seq-edit",
@@ -3202,7 +3202,7 @@ dependencies = [
 
 [[package]]
 name = "sequensss"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eframe",
  "rfd",
