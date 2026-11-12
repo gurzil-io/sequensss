@@ -52,9 +52,19 @@ Grab the latest build from the [**Releases**](https://github.com/gurzil-io/seque
 | Platform | File | Notes |
 |---|---|---|
 | Windows 10/11 (x64) | `Sequensss-windows-x64.zip` | Unzip and run `sequensss.exe`. SmartScreen may warn that the app is unsigned: click *More info → Run anyway*. |
-| macOS 11+ (Apple Silicon & Intel) | `Sequensss-macos.zip` | Unzip and move `Sequensss.app` to Applications. The first time, **right-click → Open**, because the app is not notarized. |
+| macOS 11+ (Apple Silicon & Intel) | `Sequensss-macos.zip` | Unzip and move `Sequensss.app` to Applications. The app is not notarized, so macOS blocks the first launch: see [below](#macos-app-is-blocked). |
 | Linux (x64) | `Sequensss-linux-x64.tar.gz` | Extract and run `./sequensss`. Requires ALSA and GTK 3, which most desktop distributions already have. |
 | Android 10+ (arm64) | `sequensss-<version>.apk` | Allow installs from unknown sources, then open the APK. |
+
+### macOS: app is blocked
+
+macOS says *"Sequensss" Not Opened* because the app is not notarized by Apple. To open it anyway, use either method:
+
+- Try to open the app once and click **Done**. Go to **System Settings → Privacy & Security**, scroll down to the message about Sequensss and click **Open Anyway**. Then launch the app again and confirm.
+- Or remove the quarantine flag in Terminal:
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/Sequensss.app
+  ```
 
 ---
 
