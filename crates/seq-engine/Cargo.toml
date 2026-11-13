@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 seq-model.workspace = true
 rtrb.workspace = true
+
+[dev-dependencies]
+seq-edit.workspace = true

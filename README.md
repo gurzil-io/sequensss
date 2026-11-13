@@ -150,6 +150,7 @@ crates/
 ```
 
 - The **UI never talks to the engine directly.** It edits the `Project`. Each frame, the app diffs the project, compiles a `PlaybackGraph` and sends it to the audio thread through lock-free ring buffers (`rtrb`).
+- **Channels and patterns are copy-on-write** (`CowArc`): undo snapshots share everything a gesture did not modify, comparing two snapshots stops at the shared parts, and only the modified patterns are recompiled.
 - The **engine knows nothing about cpal or egui**: it exposes `Engine::process(&mut [f32], …)`, which is why it can be tested offline and reused for WAV export.
 - **Note-offs are derived from note lengths** inside the engine, so swapping the graph mid-note can never leave a note stuck.
 

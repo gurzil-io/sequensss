@@ -11,7 +11,7 @@ pub use files::Files;
 use eframe::egui;
 use rtrb::RingBuffer;
 use seq_edit::{History, Recorder, SlotUpdate};
-use seq_engine::{Engine, EngineCmd, EngineEvent, EngineHandle, MidiInMsg, MidiOutMsg, PlayMode, compile, offline};
+use seq_engine::{Compiler, Engine, EngineCmd, EngineEvent, EngineHandle, MidiInMsg, MidiOutMsg, PlayMode, compile, offline};
 use seq_io::audio::{self, AudioOut};
 use seq_io::instruments::{SampleCache, build_slot};
 use seq_io::midi::{self, MidiInConn, MidiInTx, MidiOutThread};
@@ -49,8 +49,11 @@ struct App {
     audio_errors_seen: u32,
     cache: SampleCache,
 
-    // State already sent to the engine (diffed every frame).
+    // State already sent to the engine (diffed every frame: cheap, the snapshots
+    // share their unchanged channels and patterns).
     sent_project: Option<Project>,
+    /// Recompiles only the patterns that changed.
+    compiler: Compiler,
     sent_kinds: HashMap<ChannelId, ChannelKind>,
     sent_mode: Option<PlayMode>,
     sent_loop: Option<Option<(Tick, Tick)>>,
@@ -105,6 +108,7 @@ impl App {
             audio_errors_seen: 0,
             cache: SampleCache::default(),
             sent_project: None,
+            compiler: Compiler::default(),
             sent_kinds: HashMap::new(),
             sent_mode: None,
             sent_loop: None,
@@ -248,7 +252,7 @@ impl App {
 
         // Graph
         if self.sent_project.as_ref() != Some(&self.project) {
-            h.send(EngineCmd::SwapGraph(Box::new(compile(&self.project))));
+            h.send(EngineCmd::SwapGraph(Box::new(self.compiler.compile(&self.project))));
             self.sent_project = Some(self.project.clone());
         }
 

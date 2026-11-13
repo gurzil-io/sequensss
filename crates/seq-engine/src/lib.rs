@@ -18,7 +18,7 @@ pub use engine::{
     Engine, EngineCmd, EngineEvent, EngineHandle, Garbage, MidiInMsg, MidiOutMsg, PlayMode, Shared,
     SlotKind,
 };
-pub use graph::{PlaybackGraph, compile};
+pub use graph::{Compiler, PlaybackGraph, compile};
 pub use instrument::Instrument;
 pub use sample::SampleData;
 

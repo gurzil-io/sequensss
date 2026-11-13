@@ -3156,6 +3156,7 @@ name = "seq-engine"
 version = "0.1.2"
 dependencies = [
  "rtrb",
+ "seq-edit",
  "seq-model",
 ]
 

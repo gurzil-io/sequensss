@@ -92,8 +92,63 @@ pub fn swing_offset(start: Tick, swing: f32) -> Tick {
 }
 
 pub fn compile(p: &Project) -> PlaybackGraph {
-    let channels: Vec<ChannelParams> = p
-        .channels
+    let channels = compile_channels(p);
+    let index = channel_index(&channels);
+    let patterns = p.patterns.iter().map(|pat| compile_pattern(pat, p.swing, &index)).collect();
+    assemble(p, channels, patterns)
+}
+
+/// Incremental [`compile`], same output: keeps the compiled form of each pattern and
+/// only recompiles the patterns that changed (a modified pattern is a new `CowArc`),
+/// or all of them when the swing or the channel list changes.
+#[derive(Default)]
+pub struct Compiler {
+    swing: u32,
+    channels: Vec<ChannelId>,
+    /// The source is kept alive, so its address cannot be reused by another pattern.
+    cache: HashMap<PatternId, (CowArc<Pattern>, CompiledPattern)>,
+    /// Patterns compiled so far.
+    #[cfg(test)]
+    compiled: usize,
+}
+
+impl Compiler {
+    pub fn compile(&mut self, p: &Project) -> PlaybackGraph {
+        let channels = compile_channels(p);
+        let ids: Vec<ChannelId> = channels.iter().map(|c| c.id).collect();
+        if self.swing != p.swing.to_bits() || self.channels != ids {
+            self.cache.clear();
+            self.swing = p.swing.to_bits();
+            self.channels = ids;
+        }
+        let index = channel_index(&channels);
+        // Rebuilt every time: deleted patterns leave the cache.
+        let mut cache = HashMap::with_capacity(p.patterns.len());
+        let patterns = p
+            .patterns
+            .iter()
+            .map(|pat| {
+                let cp = match self.cache.remove(&pat.id) {
+                    Some((src, cp)) if CowArc::ptr_eq(&src, pat) => cp,
+                    _ => {
+                        #[cfg(test)]
+                        {
+                            self.compiled += 1;
+                        }
+                        compile_pattern(pat, p.swing, &index)
+                    }
+                };
+                cache.insert(pat.id, (pat.clone(), cp.clone()));
+                cp
+            })
+            .collect();
+        self.cache = cache;
+        assemble(p, channels, patterns)
+    }
+}
+
+fn compile_channels(p: &Project) -> Vec<ChannelParams> {
+    p.channels
         .iter()
         .take(MAX_CHANNELS)
         .map(|c| ChannelParams {
@@ -113,32 +168,32 @@ pub fn compile(p: &Project) -> PlaybackGraph {
                 _ => 0,
             },
         })
-        .collect();
-    let index: HashMap<ChannelId, u16> =
-        channels.iter().enumerate().map(|(i, c)| (c.id, i as u16)).collect();
+        .collect()
+}
 
-    let patterns: Vec<CompiledPattern> = p
-        .patterns
-        .iter()
-        .map(|pat| {
-            let length = pat.length.max(1);
-            let mut events = Vec::new();
-            for (cid, notes) in &pat.notes {
-                let Some(&ci) = index.get(cid) else { continue };
-                for n in notes {
-                    if n.start >= length || n.velocity == 0 {
-                        continue;
-                    }
-                    let tick = (n.start + swing_offset(n.start, p.swing)).min(length - 1);
-                    let len = n.len.max(1).min(length - tick).max(1);
-                    events.push(CompiledEvent { tick, channel: ci, key: n.key.min(127), vel: n.velocity.min(127), len });
-                }
+fn channel_index(channels: &[ChannelParams]) -> HashMap<ChannelId, u16> {
+    channels.iter().enumerate().map(|(i, c)| (c.id, i as u16)).collect()
+}
+
+fn compile_pattern(pat: &Pattern, swing: f32, index: &HashMap<ChannelId, u16>) -> CompiledPattern {
+    let length = pat.length.max(1);
+    let mut events = Vec::new();
+    for (cid, notes) in &pat.notes {
+        let Some(&ci) = index.get(cid) else { continue };
+        for n in notes {
+            if n.start >= length || n.velocity == 0 {
+                continue;
             }
-            events.sort_by_key(|e| (e.tick, e.channel, e.key));
-            CompiledPattern { id: pat.id, length, events }
-        })
-        .collect();
+            let tick = (n.start + swing_offset(n.start, swing)).min(length - 1);
+            let len = n.len.max(1).min(length - tick).max(1);
+            events.push(CompiledEvent { tick, channel: ci, key: n.key.min(127), vel: n.velocity.min(127), len });
+        }
+    }
+    events.sort_by_key(|e| (e.tick, e.channel, e.key));
+    CompiledPattern { id: pat.id, length, events }
+}
 
+fn assemble(p: &Project, channels: Vec<ChannelParams>, patterns: Vec<CompiledPattern>) -> PlaybackGraph {
     let mut song: Vec<CompiledClip> = p
         .arrangement
         .clips
@@ -201,5 +256,82 @@ mod tests {
         let g = compile(&p);
         assert_eq!(g.patterns[0].events.len(), 1);
         assert_eq!(g.patterns[0].events[0].len, 100);
+    }
+
+    /// Random edits, as the UI makes them: the incremental compile must always match
+    /// a full compile.
+    #[test]
+    fn incremental_compile_matches_full() {
+        let mut rng = 0x9e37_79b9u32;
+        let mut rand = |n: u32| seq_model::arp::xorshift(&mut rng) % n.max(1);
+        let mut p = Project::from_kit(3);
+        for _ in 0..3 {
+            seq_edit::new_pattern(&mut p);
+        }
+        let mut c = Compiler::default();
+        let mut full = 0;
+        for i in 0..2000 {
+            let pid = p.patterns[rand(p.patterns.len() as u32) as usize].id;
+            let ch = p.channels.get(rand(p.channels.len() as u32) as usize).map(|c| c.id);
+            match (rand(20), ch) {
+                (0, _) => p.swing = rand(5) as f32 / 4.0,
+                (1, _) if p.channels.len() < 12 => {
+                    p.add_channel("s", ChannelKind::Synth(SynthParams::default()));
+                }
+                (2, Some(ch)) if p.channels.len() > 2 => seq_edit::remove_channel(&mut p, ch),
+                (3, Some(ch)) => seq_edit::move_channel(&mut p, ch, rand(2) == 0),
+                (4, Some(ch)) => p.channel_mut(ch).unwrap().volume = rand(100) as f32 / 100.0,
+                (5, _) => {
+                    seq_edit::clone_pattern(&mut p, pid);
+                }
+                (6, _) => {
+                    seq_edit::delete_pattern(&mut p, pid);
+                }
+                (7, _) => {
+                    let len = (1 + rand(4) as Tick) * p.bar_len();
+                    seq_edit::set_pattern_length(&mut p, pid, len);
+                }
+                (8, _) => p.arrangement.clips.push(Clip { pattern: pid, track: 0, start: rand(8) as Tick * 3840, len: 3840 }),
+                (9, _) => p.tempo_bpm = 60.0 + rand(120) as f64,
+                (_, Some(ch)) => {
+                    let len = p.pattern(pid).unwrap().length;
+                    let notes = p.pattern_mut(pid).unwrap().notes.entry(ch).or_default();
+                    match rand(3) {
+                        0 if !notes.is_empty() => {
+                            let k = rand(notes.len() as u32) as usize;
+                            notes.remove(k);
+                        }
+                        1 if !notes.is_empty() => {
+                            let k = rand(notes.len() as u32) as usize;
+                            notes[k].start = rand(len as u32 + 500) as Tick;
+                        }
+                        _ => notes.push(Note { start: rand(len as u32) as Tick, len: 1 + rand(2000) as Tick, key: rand(128) as u8, velocity: rand(128) as u8 }),
+                    }
+                }
+                _ => {}
+            }
+            assert_eq!(c.compile(&p), compile(&p), "edit {i}");
+            full += p.patterns.len();
+        }
+        // Most edits touch a single pattern.
+        assert!(c.compiled * 3 < full, "{} of {full}", c.compiled);
+    }
+
+    #[test]
+    fn unchanged_patterns_are_not_recompiled() {
+        let mut p = Project::from_kit(0);
+        let other = seq_edit::new_pattern(&mut p);
+        let mut c = Compiler::default();
+        let g1 = c.compile(&p);
+        let kick = p.channels[0].id;
+        p.pattern_mut(other).unwrap().notes.insert(kick, vec![Note { start: 0, len: STEP, key: 36, velocity: 100 }]);
+        let g2 = c.compile(&p);
+        assert_eq!(c.compiled, 3);
+        assert_eq!(g1.patterns[0], g2.patterns[0]);
+        assert_eq!(g2.patterns[1].events.len(), 1);
+        // The swing changes every pattern.
+        p.swing = 0.5;
+        assert_eq!(c.compile(&p), compile(&p));
+        assert_eq!(c.compiled, 5);
     }
 }
