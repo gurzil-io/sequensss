@@ -3,7 +3,8 @@
 # Requires: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 set -euo pipefail
 cd "$(dirname "$0")"
-VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+VERSION="${SEQUENSSS_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
+VERSION="${VERSION#v}"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 for t in aarch64-apple-darwin x86_64-apple-darwin; do

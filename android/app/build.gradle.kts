@@ -5,6 +5,10 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Test builds (android/build-apk.sh --test): a separate app, "Sequensss Test", installed
+// next to the stable one, with its own version.
+val testBuild = (findProperty("sequensss.test") as String?) == "true"
+
 android {
     namespace = "com.sequensss.app"
     compileSdk = 35
@@ -15,6 +19,13 @@ android {
         targetSdk = 35
         versionCode = 5
         versionName = "0.1.4"
+        manifestPlaceholders["appName"] = "Sequensss"
+        if (testBuild) {
+            applicationIdSuffix = ".test"
+            manifestPlaceholders["appName"] = "Sequensss Test"
+            versionCode = (findProperty("sequensss.versionCode") as String).toInt()
+            versionName = findProperty("sequensss.versionName") as String
+        }
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }

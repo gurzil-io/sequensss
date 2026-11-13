@@ -9,6 +9,12 @@ on:
 permissions:
   contents: write
 
+# A tag with a suffix (v0.1.5-test.1) is a test build: published as a pre-release, which
+# the app's update check and the README badge ignore. The version is embedded in the
+# binaries through SEQUENSSS_VERSION.
+env:
+  SEQUENSSS_VERSION: ${{ github.ref_name }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -37,6 +43,7 @@ jobs:
           Compress-Archive -Path dist/* -DestinationPath Sequensss-windows-x64.zip
       - uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: Sequensss-windows-x64.zip
 
   macos:
@@ -50,6 +57,7 @@ jobs:
       - run: ./build-macos.sh
       - uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: dist/Sequensss-macos.zip
 
   linux:
@@ -66,4 +74,5 @@ jobs:
           tar -czf Sequensss-linux-x64.tar.gz Sequensss-linux-x64
       - uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: Sequensss-linux-x64.tar.gz

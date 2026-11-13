@@ -7,7 +7,11 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 const LATEST_URL: &str = "https://api.github.com/repos/gurzil-io/sequensss/releases/latest";
-pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
+/// Running version. Test builds set `SEQUENSSS_VERSION` (e.g. `0.1.5-test.1`) at build time.
+pub const CURRENT: &str = match option_env!("SEQUENSSS_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 const DAY: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq)]
