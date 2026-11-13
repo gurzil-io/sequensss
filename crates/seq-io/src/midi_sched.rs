@@ -148,7 +148,7 @@ mod tests {
     use super::*;
     use rtrb::{Producer, RingBuffer};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread::{JoinHandle, Thread};
 
     /// Records when each message is sent and how many times the loop ran.
@@ -156,6 +156,8 @@ mod tests {
         ring: Option<Consumer<MidiOutMsg>>,
         quit: Arc<AtomicBool>,
         sent: Vec<(Instant, u8, [u8; 3])>,
+        /// `sent.len()`, readable while the thread runs.
+        sent_count: Arc<AtomicUsize>,
         wakes: usize,
     }
 
@@ -170,6 +172,7 @@ mod tests {
 
         fn send(&mut self, port: u8, bytes: &[u8; 3]) {
             self.sent.push((Instant::now(), port, *bytes));
+            self.sent_count.store(self.sent.len(), Ordering::Relaxed);
         }
     }
 
@@ -178,6 +181,7 @@ mod tests {
         tx: Producer<MidiOutMsg>,
         thread: Thread,
         quit: Arc<AtomicBool>,
+        sent_count: Arc<AtomicUsize>,
         join: JoinHandle<FakeOutput>,
     }
 
@@ -185,16 +189,27 @@ mod tests {
         fn new() -> Self {
             let (tx, rx) = RingBuffer::new(4096);
             let quit = Arc::new(AtomicBool::new(false));
-            let mut out = FakeOutput { ring: Some(rx), quit: quit.clone(), sent: Vec::new(), wakes: 0 };
+            let sent_count = Arc::new(AtomicUsize::new(0));
+            let mut out =
+                FakeOutput { ring: Some(rx), quit: quit.clone(), sent: Vec::new(), sent_count: sent_count.clone(), wakes: 0 };
             let join = std::thread::spawn(move || {
                 run(&mut out);
                 out
             });
-            Harness { tx, thread: join.thread().clone(), quit, join }
+            Harness { tx, thread: join.thread().clone(), quit, sent_count, join }
         }
 
         fn push(&mut self, time: Instant, delay_secs: f64, port: u8, bytes: [u8; 3]) {
             self.tx.push(MidiOutMsg { port, bytes, time, delay_secs }).unwrap();
+        }
+
+        /// Waits until `n` messages were sent (at most 2 s: CI machines can stall the thread
+        /// for tens of ms, so tests wait for an outcome rather than for a fixed time).
+        fn wait_sent(&self, n: usize) {
+            let end = Instant::now() + Duration::from_secs(2);
+            while self.sent_count.load(Ordering::Relaxed) < n && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(5));
+            }
         }
 
         fn finish(self) -> FakeOutput {
@@ -378,7 +393,7 @@ mod tests {
         let t2 = Instant::now();
         h.push(t2, 0.010, 0, [0xB0, 2, 0]);
         h.thread.unpark();
-        std::thread::sleep(Duration::from_millis(250));
+        h.wait_sent(2);
         let out = h.finish();
         let got: Vec<[u8; 3]> = out.sent.iter().map(|s| s.2).collect();
         assert_eq!(got, vec![[0xB0, 2, 0], [0xB0, 1, 0]]);
@@ -398,7 +413,7 @@ mod tests {
         // A message far ahead: sleeps toward it, does not poll.
         h.push(Instant::now(), 0.150, 0, [0xB0, 1, 0]);
         h.thread.unpark();
-        std::thread::sleep(Duration::from_millis(200));
+        h.wait_sent(1);
         let out = h.finish();
         assert_eq!(out.sent.len(), 1);
         // A 1 ms poll would run ~300 times. Here: startup, unpark, one park toward the
