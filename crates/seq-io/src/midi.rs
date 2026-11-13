@@ -3,14 +3,14 @@
 //!
 //! - MIDI in: the backend callback pushes messages into an `rtrb` read by the engine.
 //! - MIDI out: sending is not RT-safe → a dedicated thread reads an `rtrb<MidiOutMsg>`
-//!   and sends each message at its time (audio latency + offset within the buffer).
+//!   and sends each message at its time (audio latency + offset within the buffer), see
+//!   midi_sched.rs.
 
 use rtrb::{Consumer, Producer};
 use seq_engine::{MidiInMsg, MidiOutMsg};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::thread::{JoinHandle, Thread};
 
 #[cfg(not(target_os = "android"))]
 #[path = "midi_midir.rs"]
@@ -19,7 +19,11 @@ mod backend;
 #[path = "midi_android.rs"]
 mod backend;
 
+#[path = "midi_sched.rs"]
+mod sched;
+
 use backend::OutConn;
+use sched::Scheduler;
 pub use backend::{connect_input, devices_generation, list_in_ports, list_out_ports};
 
 /// Shared producer to the engine. The lock is only taken in the MIDI callback
@@ -131,12 +135,24 @@ impl MidiOutThread {
         let (ctl, rx) = mpsc::channel();
         let error = Arc::new(Mutex::new(None));
         let open = Arc::new(Mutex::new(Vec::new()));
-        let (err2, open2) = (error.clone(), open.clone());
+        let mut ports = Ports { rx, conns: Vec::new(), outs: Vec::new(), error: error.clone(), open: open.clone() };
         let join = std::thread::Builder::new()
             .name("midi-out".into())
-            .spawn(move || midi_out_loop(rx, err2, open2))
+            .spawn(move || sched::run(&mut ports))
             .ok();
         MidiOutThread { ctl, join, error, open, ports: Vec::new() }
+    }
+
+    /// The thread to unpark when messages are pushed into the ring (`Engine::set_midi_out_waker`).
+    pub fn waker(&self) -> Option<Thread> {
+        self.join.as_ref().map(|j| j.thread().clone())
+    }
+
+    fn send_ctl(&self, c: Ctl) {
+        let _ = self.ctl.send(c);
+        if let Some(j) = &self.join {
+            j.thread().unpark();
+        }
     }
 
     /// Sends nothing if the configuration has not changed.
@@ -145,14 +161,14 @@ impl MidiOutThread {
             return;
         }
         self.ports = ports.to_vec();
-        let _ = self.ctl.send(Ctl::SetPorts(self.ports.clone()));
+        self.send_ctl(Ctl::SetPorts(self.ports.clone()));
     }
 
     /// After a device change: closes everything; the current config will be resent
     /// (and the ports reopened) on the next `set_ports`.
     pub fn reset(&mut self) {
         self.ports.clear();
-        let _ = self.ctl.send(Ctl::Reset);
+        self.send_ctl(Ctl::Reset);
     }
 
     pub fn is_open(&self, port: &str) -> bool {
@@ -161,7 +177,7 @@ impl MidiOutThread {
 
     /// New ring (each time the engine is recreated).
     pub fn set_ring(&self, rx: Consumer<MidiOutMsg>) {
-        let _ = self.ctl.send(Ctl::SetRing(rx));
+        self.send_ctl(Ctl::SetRing(rx));
     }
 
     pub fn take_error(&self) -> Option<String> {
@@ -171,90 +187,87 @@ impl MidiOutThread {
 
 impl Drop for MidiOutThread {
     fn drop(&mut self) {
-        let _ = self.ctl.send(Ctl::Quit);
+        self.send_ctl(Ctl::Quit);
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
     }
 }
 
-fn midi_out_loop(rx: Receiver<Ctl>, error: Arc<Mutex<Option<String>>>, open: Arc<Mutex<Vec<String>>>) {
-    // One connection per physical port, shared by the outputs targeting it.
-    let mut conns: Vec<(String, OutConn)> = Vec::new();
-    let mut outs: Vec<Option<String>> = Vec::new();
-    let mut ring: Option<Consumer<MidiOutMsg>> = None;
-    let mut queue: Vec<(Instant, u8, [u8; 3])> = Vec::new();
-    let set_err = |e: String| {
-        if let Ok(mut g) = error.lock() {
-            *g = Some(e);
+/// State of the MIDI out thread, apart from the scheduler.
+struct Ports {
+    rx: Receiver<Ctl>,
+    /// One connection per physical port, shared by the outputs targeting it.
+    conns: Vec<(String, OutConn)>,
+    outs: Vec<Option<String>>,
+    error: Arc<Mutex<Option<String>>>,
+    open: Arc<Mutex<Vec<String>>>,
+}
+
+impl Ports {
+    fn publish(&self) {
+        if let Ok(mut o) = self.open.lock() {
+            *o = self.conns.iter().map(|c| c.0.clone()).collect();
         }
-    };
-    let publish = |conns: &Vec<(String, OutConn)>| {
-        if let Ok(mut o) = open.lock() {
-            *o = conns.iter().map(|c| c.0.clone()).collect();
-        }
-    };
-    loop {
-        while let Ok(c) = rx.try_recv() {
+    }
+}
+
+impl sched::Output for Ports {
+    fn control(&mut self, sched: &mut Scheduler) -> bool {
+        while let Ok(c) = self.rx.try_recv() {
             match c {
                 Ctl::Quit => {
-                    for (_, c) in conns.iter_mut() {
+                    for (_, c) in self.conns.iter_mut() {
                         all_notes_off(c);
                     }
-                    return;
+                    return false;
                 }
-                Ctl::SetRing(r) => ring = Some(r),
+                Ctl::SetRing(r) => sched.set_ring(r),
                 Ctl::Reset => {
-                    queue.clear();
-                    conns.clear();
-                    outs.clear();
-                    publish(&conns);
+                    sched.clear();
+                    self.conns.clear();
+                    self.outs.clear();
+                    self.publish();
                 }
                 Ctl::SetPorts(ports) => {
-                    queue.clear();
+                    sched.clear();
                     // Close ports no longer in use (after an all-notes-off).
                     let mut i = 0;
-                    while i < conns.len() {
-                        if ports.iter().flatten().any(|p| *p == conns[i].0) {
+                    while i < self.conns.len() {
+                        if ports.iter().flatten().any(|p| *p == self.conns[i].0) {
                             i += 1;
                         } else {
-                            let (_, mut c) = conns.remove(i);
+                            let (_, mut c) = self.conns.remove(i);
                             all_notes_off(&mut c);
                         }
                     }
                     // Open the new ones.
                     for name in ports.iter().flatten() {
-                        if conns.iter().any(|c| c.0 == *name) {
+                        if self.conns.iter().any(|c| c.0 == *name) {
                             continue;
                         }
                         match backend::open_out(name) {
-                            Ok(c) => conns.push((name.clone(), c)),
-                            Err(e) => set_err(e.to_string()),
+                            Ok(c) => self.conns.push((name.clone(), c)),
+                            Err(e) => {
+                                if let Ok(mut g) = self.error.lock() {
+                                    *g = Some(e.to_string());
+                                }
+                            }
                         }
                     }
-                    outs = ports;
-                    publish(&conns);
+                    self.outs = ports;
+                    self.publish();
                 }
             }
         }
-        let now = Instant::now();
-        if let Some(r) = ring.as_mut() {
-            while let Ok(m) = r.pop() {
-                queue.push((now + Duration::from_secs_f64(m.delay_secs.clamp(0.0, 1.0)), m.port, m.bytes));
-            }
+        true
+    }
+
+    fn send(&mut self, port: u8, bytes: &[u8; 3]) {
+        let Some(Some(name)) = self.outs.get(port as usize) else { return };
+        if let Some((_, c)) = self.conns.iter_mut().find(|c| c.0 == *name) {
+            let _ = c.send(bytes);
         }
-        if !queue.is_empty() {
-            // Send in chronological order (stable sort: off/on order is preserved).
-            queue.sort_by_key(|q| q.0);
-            let due = queue.partition_point(|q| q.0 <= now);
-            for (_, port, bytes) in queue.drain(..due) {
-                let Some(Some(name)) = outs.get(port as usize) else { continue };
-                if let Some((_, c)) = conns.iter_mut().find(|c| c.0 == *name) {
-                    let _ = c.send(&bytes);
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(1));
     }
 }
 

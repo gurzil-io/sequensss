@@ -17,6 +17,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use seq_model::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread::Thread;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +83,10 @@ pub struct MidiOutMsg {
     /// Index of the MIDI output (`Project::midi_outs`).
     pub port: u8,
     pub bytes: [u8; 3],
-    /// Send delay from reception by the MIDI thread (audio output latency + offset).
+    /// Start of the audio callback that produced the message.
+    pub time: Instant,
+    /// Send delay from `time` (audio output latency + offset in the callback): the message
+    /// is due at `time + delay_secs`.
     pub delay_secs: f64,
 }
 
@@ -227,12 +231,16 @@ pub struct Engine {
 
     latency: f64,
     cb_frame: usize,
+    cb_time: Instant,
 
     cmds: Consumer<EngineCmd>,
     events: Producer<EngineEvent>,
     garbage: Producer<Garbage>,
     midi_in: Option<Consumer<MidiInMsg>>,
     midi_out: Option<Producer<MidiOutMsg>>,
+    /// MIDI out thread, woken after a callback that pushed messages.
+    midi_out_waker: Option<Thread>,
+    midi_out_pushed: bool,
     shared: Arc<Shared>,
 }
 
@@ -275,15 +283,24 @@ impl Engine {
             master_peak: (0.0, 0.0),
             latency: 0.0,
             cb_frame: 0,
+            cb_time: Instant::now(),
             cmds: cmd_rx,
             events: ev_tx,
             garbage: gb_tx,
             midi_in,
             midi_out,
+            midi_out_waker: None,
+            midi_out_pushed: false,
             shared: shared.clone(),
         };
         let handle = EngineHandle { cmds: cmd_tx, events: ev_rx, garbage: gb_rx, shared };
         (engine, handle)
+    }
+
+    /// Thread to unpark when MIDI out messages are pushed (`Thread::unpark` is lock-free
+    /// and does not allocate: safe on the audio thread).
+    pub fn set_midi_out_waker(&mut self, waker: Option<Thread>) {
+        self.midi_out_waker = waker;
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -305,11 +322,12 @@ impl Engine {
         self.process_at(out, channels, latency_secs, Instant::now());
     }
 
-    /// `process` with the current time given (tests).
+    /// `process` with the current time given (tests, or a callback rendered in several calls).
     pub fn process_at(&mut self, out: &mut [f32], channels: usize, latency_secs: f64, now: Instant) {
         let channels = channels.max(1);
         self.latency = latency_secs;
         self.cb_frame = 0;
+        self.cb_time = now;
         while let Ok(cmd) = self.cmds.pop() {
             self.handle_cmd(cmd);
         }
@@ -340,6 +358,11 @@ impl Engine {
         }
         self.shared.playhead_bits.store(self.position().to_bits(), Ordering::Relaxed);
         self.shared.playing.store(self.playing, Ordering::Relaxed);
+        if std::mem::take(&mut self.midi_out_pushed) {
+            if let Some(w) = &self.midi_out_waker {
+                w.unpark();
+            }
+        }
     }
 
     pub fn handle_cmd(&mut self, cmd: EngineCmd) {
@@ -574,7 +597,9 @@ impl Engine {
     fn midi_send(&mut self, port: u8, bytes: [u8; 3], at: usize) {
         let delay_secs = self.latency + (self.cb_frame + at) as f64 / self.sr;
         if let Some(tx) = self.midi_out.as_mut() {
-            let _ = tx.push(MidiOutMsg { port, bytes, delay_secs });
+            if tx.push(MidiOutMsg { port, bytes, time: self.cb_time, delay_secs }).is_ok() {
+                self.midi_out_pushed = true;
+            }
         }
     }
 
@@ -1814,6 +1839,29 @@ mod tests {
         let on: Vec<u8> = drain(&mut rx).iter().filter(|m| m.1[0] & 0xF0 == 0x90).map(|m| m.1[0]).collect();
         // Channel 1 is not soloed: only channel 0 plays.
         assert_eq!(on, vec![0x90]);
+    }
+
+    #[test]
+    fn midi_out_stamps_callback_time_and_wakes_thread() {
+        let note = Note { start: 0, len: STEP, key: 60, velocity: 100 };
+        let (p, ids) = midi_out_project(&[(0, 0)], &[note]);
+        let (mut e, _h, mut rx) = midi_out_engine(&p, &ids);
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        // The unpark token is kept: if the engine unparked the thread before it parks,
+        // `park_timeout` returns at once.
+        let waiter = std::thread::spawn(move || {
+            go_rx.recv().unwrap();
+            let t = Instant::now();
+            std::thread::park_timeout(std::time::Duration::from_secs(5));
+            t.elapsed()
+        });
+        e.set_midi_out_waker(Some(waiter.thread().clone()));
+        let now = Instant::now();
+        e.process_at(&mut vec![0.0; 1024], 2, 0.01, now);
+        let m = rx.pop().unwrap();
+        assert_eq!((m.bytes, m.time), ([0x90, 60, 100], now));
+        go_tx.send(()).unwrap();
+        assert!(waiter.join().unwrap() < std::time::Duration::from_secs(1));
     }
 
     #[test]
