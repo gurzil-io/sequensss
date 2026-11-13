@@ -207,17 +207,9 @@ This project belongs to everyone who uses it, so don't hesitate to change it.
 - **Send a pull request**, big or small: a fix, a new sound, a translation, a UI tweak. The tests (`cargo test --workspace`) and the [architecture notes](#architecture) help you find your way around.
 - **Open an issue** for a bug or an idea. The [issue list](https://github.com/gurzil-io/sequensss/issues) is a good place to start; the `nice to have` label marks the bigger projects.
 
-### How issues move
+### Working on the project
 
-Issues are tracked on the [project board](https://github.com/orgs/gurzil-io/projects/1): **Backlog → Todo → In progress → To test → Done**.
-
-1. When a change is ready, its issue moves to **To test** and the **beta** is updated. There is a single beta, always at the same link: [**releases/tag/beta**](https://github.com/gurzil-io/sequensss/releases/tag/beta). Its notes list the issues to check.
-2. On Android, the beta is a separate app, **Sequensss Beta**, installed next to the stable one, so you can test without touching your real setup. Install each new beta APK over the previous one. Desktop betas are regular binaries.
-3. If the change works, close the issue: it moves to **Done**. If not, comment on it and it goes back to **In progress**.
-
-### Versions
-
-[Semantic versioning](https://semver.org): `MAJOR.MINOR.PATCH`. While in `0.x`, a minor bump (`0.2.0`) brings features or breaking changes, a patch bump (`0.2.1`) only fixes bugs. Betas are previews of the next stable version: `0.2.0-beta.1`, `0.2.0-beta.2`, then `0.2.0`. The version lives in one place, the workspace `Cargo.toml`; the Android version code is derived from it. The in-app update check only follows stable releases, never betas.
+The project rules (conventions, architecture, building and testing, how issues move from the [project board](https://github.com/orgs/gurzil-io/projects/1) to the [beta](https://github.com/gurzil-io/sequensss/releases/tag/beta), versions and releases) are in [**CONTRIBUTING.md**](CONTRIBUTING.md).
 
 ---
 
