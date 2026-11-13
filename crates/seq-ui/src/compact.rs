@@ -228,17 +228,29 @@ impl SeqUi {
         });
     }
 
-    /// Full screen: floating Play/Stop at the bottom right (the top bar is hidden).
+    /// Full screen: floating Undo/Redo and Play/Stop at the bottom right (the top bar is hidden).
     pub(crate) fn floating_transport(&mut self, ctx: &egui::Context, info: &PlaybackInfo) {
         egui::Area::new(egui::Id::new("floating_transport"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-22.0, -14.0))
             .show(ctx, |ui| {
-                let (bg, _) = ui.allocate_exact_size(vec2(2.0 * 52.0 + 4.0 + 12.0, 52.0 + 12.0), Sense::hover());
+                let gap = 10.0;
+                let (bg, _) = ui.allocate_exact_size(vec2(4.0 * 52.0 + 2.0 * 4.0 + gap + 12.0, 52.0 + 12.0), Sense::hover());
                 ui.painter().rect_filled(bg.translate(vec2(0.0, 4.0)), 12.0, egui::Color32::from_black_alpha(90));
                 ui.painter().rect_filled(bg, 12.0, with_alpha(BAR_BOT, 235));
                 let mut row = ui.new_child(UiBuilder::new().max_rect(bg.shrink(6.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
                 row.spacing_mut().item_spacing.x = 4.0;
+                row.add_enabled_ui(self.can_undo, |ui| {
+                    if skin::icon_button(ui, vec2(52.0, 52.0), Kind::Cream, Icon::Undo, 20.0).on_hover_text("Ctrl+Z").clicked() {
+                        self.act(UiAction::Undo);
+                    }
+                });
+                row.add_enabled_ui(self.can_redo, |ui| {
+                    if skin::icon_button(ui, vec2(52.0, 52.0), Kind::Cream, Icon::Redo, 20.0).on_hover_text("Ctrl+Y").clicked() {
+                        self.act(UiAction::Redo);
+                    }
+                });
+                row.add_space(gap - 4.0);
                 let play_icon = if info.playing { Icon::Pause } else { Icon::Play };
                 if skin::icon_button(&mut row, vec2(52.0, 52.0), Kind::Orange, play_icon, 22.0).clicked() {
                     self.act(UiAction::TogglePlay);
