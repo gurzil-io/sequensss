@@ -384,10 +384,11 @@ mod tests {
         assert_eq!(got, vec![[0xB0, 2, 0], [0xB0, 1, 0]]);
         let late2 = out.sent[0].0 - (t2 + Duration::from_millis(10));
         let late1 = out.sent[1].0 - (t + Duration::from_millis(200));
-        // Loose bound: CI machines are noisy VMs (an early send would underflow above).
-        // Precision is measured by the ignored tests below.
-        assert!(late2 < Duration::from_millis(30), "{late2:?}");
-        assert!(late1 < Duration::from_millis(30), "{late1:?}");
+        // Message 2 going out before message 1 (due at 200 ms) shows the thread was woken.
+        // Loose bound: CI machines are noisy VMs (an early send would underflow above);
+        // precision is measured by the ignored tests below.
+        assert!(late2 < Duration::from_millis(100), "{late2:?}");
+        assert!(late1 < Duration::from_millis(100), "{late1:?}");
     }
 
     #[test]
