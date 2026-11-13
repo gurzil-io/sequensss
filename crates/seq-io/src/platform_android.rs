@@ -1,5 +1,5 @@
 //! Android services (JNI bridge to `com.sequensss.app.PlatformBridge`): file picker,
-//! native text input dialog, "Share" sheet.
+//! native text input dialog, "Share" sheet, web links.
 //!
 //! Everything is asynchronous: start the operation, then read the results every frame with
 //! [`take_result`].
@@ -71,6 +71,15 @@ pub fn share(path: &Path, mime: &str, title: &str) {
             "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
             &[JValue::Object(&p), JValue::Object(&m), JValue::Object(&t)],
         )?;
+        Ok(())
+    }));
+}
+
+/// Opens a web page in the system browser.
+pub fn open_url(url: &str) {
+    log_err(with_class(CLASS, |env, c| {
+        let u = env.new_string(url)?;
+        env.call_static_method(c, "openUrl", "(Ljava/lang/String;)V", &[JValue::Object(&u)])?;
         Ok(())
     }));
 }

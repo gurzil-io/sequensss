@@ -529,6 +529,24 @@ pub fn menu_item(ui: &mut Ui, text: &str, color: Color32, selected: bool) -> Res
     resp
 }
 
+/// Menu row with an on/off switch on the right (the click toggles: up to the caller).
+pub fn menu_toggle(ui: &mut Ui, text: &str, on: bool) -> Response {
+    let w = ui.available_width().max(200.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 40.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, 7.0, hex(0x433a32));
+    }
+    p.text(pos2(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, text, body(15.5), TEXT);
+    let pill = Rect::from_center_size(pos2(rect.right() - 12.0 - 19.0, rect.center().y), vec2(38.0, 20.0));
+    p.rect_filled(pill, 10.0, if on { ORANGE } else { hex(0x161210) });
+    p.rect_stroke(pill, 10.0, Stroke::new(1.0_f32, EDGE));
+    let kc = pos2(if on { pill.right() - 10.0 } else { pill.left() + 10.0 }, pill.center().y);
+    p.circle_filled(kc, 7.0, if on { CREAM_HL } else { SEG_ON });
+    p.circle_stroke(kc, 7.0, Stroke::new(1.0_f32, EDGE));
+    resp
+}
+
 /// Group title inside a menu.
 pub fn menu_caption(ui: &mut Ui, text: &str) {
     ui.add_space(4.0);

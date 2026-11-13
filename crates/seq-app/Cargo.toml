@@ -20,6 +20,9 @@ seq-io.workspace = true
 seq-ui.workspace = true
 eframe.workspace = true
 rtrb.workspace = true
+# Update check (GitHub API): blocking HTTP client with rustls, no OpenSSL.
+ureq = "3.1"
+serde_json = "1.0"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd.workspace = true

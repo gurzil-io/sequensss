@@ -4,6 +4,7 @@
 #[cfg(target_os = "android")]
 mod android_files;
 pub mod files;
+mod update;
 
 pub use eframe;
 pub use files::Files;
@@ -22,6 +23,7 @@ use seq_model::*;
 use seq_ui::{PlaybackInfo, SeqUi, UiAction};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -76,13 +78,16 @@ struct App {
     confirm: Option<Pending>,
     title: String,
     files: Files,
+    settings: files::Settings,
+    /// Update check in progress (see `update.rs`).
+    update_check: Option<Receiver<Result<Option<update::Release>, String>>>,
     /// Android: target channel of a WAV being picked (`Some(None)` = new channel).
     #[cfg(target_os = "android")]
     pending_sample: Option<Option<ChannelId>>,
 }
 
 impl App {
-    fn new(path: Option<PathBuf>, files: Files) -> Self {
+    fn new(path: Option<PathBuf>, files: Files, settings: files::Settings) -> Self {
         let mut project = Project::from_kit(0);
         let mut file = None;
         let mut status = String::new();
@@ -97,6 +102,7 @@ impl App {
         }
         let mut ui = SeqUi::new(&project);
         ui.status = status;
+        ui.check_updates = settings.check_updates;
         let mut app = App {
             history: History::new(&project, 200),
             saved: project.clone(),
@@ -128,9 +134,13 @@ impl App {
             confirm: None,
             title: String::new(),
             files,
+            settings,
+            update_check: None,
             #[cfg(target_os = "android")]
             pending_sample: None,
         };
+        app.show_known_update();
+        app.start_update_check();
         app.refresh_devices();
         app.start_audio();
         if cfg!(target_os = "android")
@@ -403,6 +413,58 @@ impl App {
     }
 
     // ------------------------------------------------------------------
+    // Settings, update check
+    // ------------------------------------------------------------------
+
+    fn save_settings(&mut self) {
+        if let Err(e) = self.settings.save(&self.files) {
+            self.ui.status = trf!("Réglages non enregistrés : {e}", "Settings not saved: {e}");
+        }
+    }
+
+    /// Shows the notice for the latest release found by an earlier check, if it still applies
+    /// (no request: the check itself runs at most once a day).
+    fn show_known_update(&mut self) {
+        let s = &self.settings;
+        self.ui.update = s
+            .latest_release
+            .as_ref()
+            .filter(|(v, _)| s.check_updates && update::should_notify(v, update::CURRENT, s.skipped_version.as_deref()))
+            .map(|(v, url)| seq_ui::UpdateNotice { version: v.clone(), url: url.clone() });
+    }
+
+    /// Starts the background check if it is on and due (at most once a day).
+    fn start_update_check(&mut self) {
+        let s = &self.settings;
+        if self.update_check.is_none() && update::should_check(s.check_updates, s.last_update_check, update::unix_now()) {
+            self.update_check = Some(update::spawn_check());
+        }
+    }
+
+    /// Result of the check, if it arrived. Only a successful answer counts as the day's check:
+    /// after a failure, the next launch tries again.
+    fn poll_update_check(&mut self) {
+        let Some(rx) = &self.update_check else { return };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("check thread stopped".into()),
+        };
+        self.update_check = None;
+        match result {
+            Ok(release) => {
+                self.settings.last_update_check = Some(update::unix_now());
+                self.settings.latest_release = release.map(|r| (r.version, r.url));
+                if let Err(e) = self.settings.save(&self.files) {
+                    update::debug_log(&e.to_string());
+                }
+                self.show_known_update();
+            }
+            Err(e) => update::debug_log(&e),
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Files
     // ------------------------------------------------------------------
 
@@ -575,7 +637,7 @@ impl App {
         self.project != self.saved
     }
 
-    fn handle_action(&mut self, a: UiAction) {
+    fn handle_action(&mut self, ctx: &egui::Context, a: UiAction) {
         match a {
             UiAction::TogglePlay => {
                 let playing = self.handle.as_ref().is_some_and(|h| h.shared.playing());
@@ -623,10 +685,21 @@ impl App {
             UiAction::SetLanguage(lang) => {
                 seq_i18n::set(lang);
                 self.update_file_label(); // "Untitled"
-                if let Err(e) = (files::Settings { lang: Some(lang) }).save(&self.files) {
-                    self.ui.status = trf!("Réglages non enregistrés : {e}", "Settings not saved: {e}");
-                }
+                self.settings.lang = Some(lang);
+                self.save_settings();
             }
+            UiAction::SetCheckUpdates(on) => {
+                self.settings.check_updates = on;
+                self.ui.check_updates = on;
+                self.save_settings();
+                self.show_known_update();
+                self.start_update_check();
+            }
+            UiAction::SkipVersion(v) => {
+                self.settings.skipped_version = Some(v);
+                self.save_settings();
+            }
+            UiAction::OpenUrl(url) => open_url(ctx, &url),
             UiAction::RefreshDevices => {
                 self.refresh_devices();
                 self.ui.status = tr!("Listes rafraîchies", "Lists refreshed").into();
@@ -700,6 +773,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_engine();
+        self.poll_update_check();
         #[cfg(target_os = "android")]
         self.poll_platform();
 
@@ -715,7 +789,7 @@ impl eframe::App for App {
 
         let actions = self.ui.show(ctx, &mut self.project, &info);
         for a in actions {
-            self.handle_action(a);
+            self.handle_action(ctx, a);
         }
         self.confirm_dialog(ctx);
 
@@ -738,10 +812,23 @@ impl eframe::App for App {
     }
 }
 
+/// Opens a web page in the system browser (Android: through `PlatformBridge`, egui's
+/// `open_url` does nothing under GameActivity).
+fn open_url(ctx: &egui::Context, url: &str) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = ctx;
+        seq_io::platform::open_url(url);
+    }
+    #[cfg(not(target_os = "android"))]
+    ctx.open_url(egui::OpenUrl::new_tab(url));
+}
+
 /// Runs the application. `path`: project to open at startup; `locale`: system language
 /// (`fr-FR`, `en`…), used if no language was chosen in the menu.
 pub fn run(options: eframe::NativeOptions, path: Option<PathBuf>, files: Files, locale: Option<String>) -> eframe::Result<()> {
-    let lang = files::Settings::load(&files)
+    let settings = files::Settings::load(&files);
+    let lang = settings
         .lang
         .or_else(|| locale.as_deref().map(seq_i18n::Lang::from_locale))
         .unwrap_or(seq_i18n::Lang::Fr);
@@ -751,7 +838,7 @@ pub fn run(options: eframe::NativeOptions, path: Option<PathBuf>, files: Files, 
         options,
         Box::new(move |cc| {
             SeqUi::install_theme(&cc.egui_ctx);
-            Ok(Box::new(App::new(path, files)))
+            Ok(Box::new(App::new(path, files, settings)))
         }),
     )
 }

@@ -16,7 +16,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * Android services for the Rust code (crates/seq-io/src/platform_android.rs):
- * file picker, text input dialog, sharing.
+ * file picker, text input dialog, sharing, web links.
  *
  * Operations are asynchronous: the result goes into a queue that Rust reads every
  * frame (`takeResult`), as "kind\nvalue" ("kind\n" alone = cancelled).
@@ -151,6 +151,21 @@ object PlatformBridge {
                 a.startActivity(Intent.createChooser(send, title))
             } catch (e: Exception) {
                 Log.w(TAG, "share: $e")
+            }
+        }
+    }
+
+    /** Opens a web page (release notes) in the browser. */
+    @JvmStatic fun openUrl(url: String) {
+        val a = activity?.get() ?: return
+        a.runOnUiThread {
+            try {
+                val view = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                a.startActivity(view)
+            } catch (e: Exception) {
+                Log.w(TAG, "openUrl: $e")
             }
         }
     }

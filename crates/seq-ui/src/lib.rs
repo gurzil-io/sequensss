@@ -18,6 +18,7 @@ mod browser;
 mod compact;
 mod icons;
 mod midi_panel;
+mod notice;
 mod piano;
 mod playlist;
 mod props;
@@ -29,6 +30,7 @@ mod widgets;
 
 use icons::Icon;
 pub use browser::Browser;
+pub use notice::UpdateNotice;
 pub use piano::PianoState;
 pub use playlist::PlaylistState;
 use skin::Kind;
@@ -55,6 +57,12 @@ pub enum UiAction {
     RefreshDevices,
     /// Interface language (applied and remembered by the app).
     SetLanguage(seq_i18n::Lang),
+    /// "Check for updates" setting (remembered by the app).
+    SetCheckUpdates(bool),
+    /// Open a web page (release notes) in the system browser.
+    OpenUrl(String),
+    /// Do not notify about this version again.
+    SkipVersion(String),
     /// Project browser (Android): open / share / delete a project by name,
     /// save under a new name, import a file from the device.
     BrowserOpen(String),
@@ -75,6 +83,11 @@ fn language_items(ui: &mut egui::Ui) -> Option<seq_i18n::Lang> {
         }
     }
     chosen
+}
+
+/// "Check for updates" switch of the menus; returns the new value when clicked.
+fn update_toggle(ui: &mut egui::Ui, on: bool) -> Option<bool> {
+    skin::menu_toggle(ui, tr!("Rechercher les mises à jour", "Check for updates"), on).clicked().then_some(!on)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +183,10 @@ pub struct SeqUi {
     playlist: PlaylistState,
     /// Open project browser (filled by the app; Android).
     pub browser: Option<browser::Browser>,
+    /// "Check for updates" setting (mirrored by the app).
+    pub check_updates: bool,
+    /// Newer version available (set by the app, cleared when closed).
+    pub update: Option<UpdateNotice>,
     actions: Vec<UiAction>,
     shown_status: String,
     status_since: f64,
@@ -207,6 +224,8 @@ impl SeqUi {
             piano: PianoState::default(),
             playlist: PlaylistState::default(),
             browser: None,
+            check_updates: true,
+            update: None,
             actions: Vec::new(),
             shown_status: String::new(),
             status_since: 0.0,
@@ -222,10 +241,13 @@ impl SeqUi {
     pub fn reset_for(&mut self, project: &Project) {
         let devices = std::mem::take(&mut self.devices);
         let status = std::mem::take(&mut self.status);
-        let (focus, tab) = (self.focus, self.tab);
+        let update = self.update.take();
+        let (focus, tab, check_updates) = (self.focus, self.tab, self.check_updates);
         *self = SeqUi::new(project);
         self.devices = devices;
         self.status = status;
+        self.update = update;
+        self.check_updates = check_updates;
         self.focus = focus;
         self.tab = tab;
     }
@@ -350,6 +372,7 @@ impl SeqUi {
         }
         props::windows(self, ctx, project);
         self.browser_window(ctx);
+        self.update_notice(ctx);
         self.toast(ctx);
 
         let pointer_down = ctx.input(|i| i.pointer.primary_down() || i.pointer.secondary_down());
@@ -700,6 +723,10 @@ impl SeqUi {
             skin::menu_separator(ui);
             if let Some(l) = language_items(ui) {
                 self.act(UiAction::SetLanguage(l));
+            }
+            skin::menu_separator(ui);
+            if let Some(on) = update_toggle(ui, self.check_updates) {
+                self.act(UiAction::SetCheckUpdates(on));
             }
         });
     }

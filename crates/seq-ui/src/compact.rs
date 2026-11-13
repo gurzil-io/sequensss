@@ -186,6 +186,10 @@ impl SeqUi {
             if let Some(l) = crate::language_items(ui) {
                 chosen = Some(UiAction::SetLanguage(l));
             }
+            skin::menu_separator(ui);
+            if let Some(on) = crate::update_toggle(ui, self.check_updates) {
+                chosen = Some(UiAction::SetCheckUpdates(on));
+            }
             ui.add_space(6.0);
             if let Some(a) = chosen {
                 self.act(a);

@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Update check (GitHub API) and release page. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- USB / Bluetooth MIDI. -->
     <uses-feature android:name="android.software.midi" android:required="false" />
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />

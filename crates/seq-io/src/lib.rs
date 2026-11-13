@@ -4,7 +4,7 @@
 mod android_jni;
 pub mod audio;
 pub mod export;
-/// Android services: file picker, text input, sharing.
+/// Android services: file picker, text input, sharing, web links.
 #[cfg(target_os = "android")]
 #[path = "platform_android.rs"]
 pub mod platform;

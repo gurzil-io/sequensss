@@ -56,6 +56,10 @@ Grab the latest build from the [**Releases**](https://github.com/gurzil-io/seque
 | Linux (x64) | `Sequensss-linux-x64.tar.gz` | Extract and run `./sequensss`. Requires ALSA and GTK 3, which most desktop distributions already have. |
 | Android 10+ (arm64) | `sequensss-<version>.apk` | Allow installs from unknown sources, then open the APK. |
 
+### Updates
+
+At startup, at most once a day, the app asks GitHub whether a newer release exists and shows a small notice if it does. Nothing is sent besides that request. You can turn the check off with **Check for updates** in the file menu (≡ menu on phones and tablets).
+
 ### macOS: app is blocked
 
 macOS says *"Sequensss" Not Opened* because the app is not notarized by Apple. To open it anyway, use either method:
