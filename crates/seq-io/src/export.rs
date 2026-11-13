@@ -225,8 +225,8 @@ mod tests {
     /// Renders and writes like the app does (`export_wav_to`), then reads the file back.
     fn export_and_read(p: &Project, mode: seq_engine::PlayMode, path: &Path) -> (hound::WavSpec, Vec<i16>) {
         let sr = 48_000;
-        let mut cache = crate::instruments::SampleCache::default();
-        let slots = p.channels.iter().map(|c| (c.id, crate::instruments::build_slot(c, sr, &mut cache).unwrap())).collect();
+        let cache = crate::instruments::SampleCache::default();
+        let slots = p.channels.iter().map(|c| (c.id, crate::instruments::build_slot(c, sr, &cache).unwrap())).collect();
         let audio = seq_engine::offline::render(seq_engine::graph::compile(p), slots, sr, mode, 2.0);
         write_wav(path, &audio, sr).unwrap();
         let mut r = hound::WavReader::open(path).unwrap();

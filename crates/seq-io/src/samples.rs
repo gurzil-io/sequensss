@@ -1,8 +1,14 @@
-//! WAV sample loading (hound). v1: WAV only, synchronous loading.
+//! WAV sample loading (hound). v1: WAV only. Decoding runs off the UI thread (see `loader`).
 
 use crate::Result;
 use seq_engine::SampleData;
 use std::path::Path;
+
+/// Checks that the file exists and has a valid WAV header, without decoding it (fast).
+pub fn probe_wav(path: &Path) -> Result<()> {
+    hound::WavReader::open(path)?;
+    Ok(())
+}
 
 pub fn load_wav(path: &Path) -> Result<SampleData> {
     let mut reader = hound::WavReader::open(path)?;

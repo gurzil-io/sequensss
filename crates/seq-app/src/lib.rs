@@ -13,9 +13,10 @@ use rtrb::RingBuffer;
 use seq_edit::{History, Recorder, SlotUpdate};
 use seq_engine::{Compiler, Engine, EngineCmd, EngineEvent, EngineHandle, MidiInMsg, MidiOutMsg, PlayMode, compile, offline};
 use seq_io::audio::{self, AudioOut};
-use seq_io::instruments::{SampleCache, build_slot};
+use seq_io::instruments::{build_slot, sampler_slot};
+use seq_io::loader::SampleLoader;
 use seq_io::midi::{self, MidiInConn, MidiInTx, MidiOutThread};
-use seq_io::{export, project_file};
+use seq_io::{export, project_file, samples};
 use seq_i18n::{tr, trf};
 use seq_model::*;
 use seq_ui::{PlaybackInfo, SeqUi, UiAction};
@@ -47,7 +48,8 @@ struct App {
     sample_rate: u32,
     audio_choice: Option<String>,
     audio_errors_seen: u32,
-    cache: SampleCache,
+    /// Background sample loading (and the sample cache).
+    loader: SampleLoader,
 
     // State already sent to the engine (diffed every frame: cheap, the snapshots
     // share their unchanged channels and patterns).
@@ -106,7 +108,7 @@ impl App {
             sample_rate: EXPORT_SR,
             audio_choice: None,
             audio_errors_seen: 0,
-            cache: SampleCache::default(),
+            loader: SampleLoader::new(2),
             sent_project: None,
             compiler: Compiler::default(),
             sent_kinds: HashMap::new(),
@@ -174,6 +176,8 @@ impl App {
             Err(e) => self.ui.status = trf!("Audio : {e}", "Audio: {e}"),
         }
         self.midi_out.set_ring(out_rx);
+        // Every instrument is rebuilt below (`sent_kinds` cleared), at the new sample rate.
+        self.loader.cancel_all();
 
         // Reconnect MIDI in to the new ring.
         if let Some(c) = self.midi_in.take() {
@@ -230,6 +234,7 @@ impl App {
                 SlotUpdate::Remove(id) => {
                     h.send(EngineCmd::RemoveSlot(id));
                     self.sent_kinds.remove(&id);
+                    self.loader.cancel(id);
                     continue;
                 }
                 SlotUpdate::SynthParams(id, p) => {
@@ -240,11 +245,21 @@ impl App {
             };
             let Some(ch) = self.project.channel(id) else { continue };
             if matches!(u, SlotUpdate::Rebuild(_)) {
-                match build_slot(ch, self.sample_rate, &mut self.cache) {
-                    Ok(kind) => {
-                        h.send(EngineCmd::SetSlot(id, kind));
+                match &ch.kind {
+                    // WAV file not in the cache: decoded in the background (see `poll_samples`);
+                    // the channel keeps its previous instrument until then.
+                    ChannelKind::Sampler { source: source @ SampleSource::File(_) } if self.loader.cache().peek(source, self.sample_rate).is_none() => {
+                        self.loader.request(id, source.clone(), self.sample_rate);
                     }
-                    Err(e) => self.ui.status = trf!("{} : {e}", "{}: {e}", ch.name),
+                    _ => {
+                        self.loader.cancel(id);
+                        match build_slot(ch, self.sample_rate, self.loader.cache()) {
+                            Ok(kind) => {
+                                h.send(EngineCmd::SetSlot(id, kind));
+                            }
+                            Err(e) => self.ui.status = trf!("{} : {e}", "{}: {e}", ch.name),
+                        }
+                    }
                 }
             }
             self.sent_kinds.insert(id, ch.kind.clone());
@@ -284,6 +299,26 @@ impl App {
         }
     }
 
+    /// Samples loaded in the background → engine. Results that no longer match the channel
+    /// (source or sample rate changed meanwhile) are dropped.
+    fn poll_samples(&mut self) {
+        while let Some(l) = self.loader.poll() {
+            let Some(ch) = self.project.channel(l.channel) else { continue };
+            let current = matches!(&ch.kind, ChannelKind::Sampler { source } if *source == l.source);
+            if !current || l.sample_rate != self.sample_rate {
+                continue;
+            }
+            match l.result {
+                Ok(s) => {
+                    if let Some(h) = self.handle.as_mut() {
+                        h.send(EngineCmd::SetSlot(l.channel, sampler_slot(s)));
+                    }
+                }
+                Err(e) => self.ui.status = trf!("{} : {e}", "{}: {e}", ch.name),
+            }
+        }
+    }
+
     fn poll_engine(&mut self) {
         let mut recorded = Vec::new();
         if let Some(h) = self.handle.as_mut() {
@@ -307,7 +342,7 @@ impl App {
             if cfg!(target_os = "android") {
                 // Headphones plugged/unplugged, Bluetooth…: AAudio closes the stream, so reopen it
                 // (the sample rate may change → sample cache cleared).
-                self.cache = SampleCache::default();
+                self.loader.cache().clear();
                 self.start_audio();
                 if self.audio.is_some() {
                     self.ui.status = tr!("Sortie audio changée : flux rouvert", "Audio output changed: stream reopened").into();
@@ -458,9 +493,10 @@ impl App {
     /// Offline render to `path`. Returns `true` if the file was written.
     fn export_wav_to(&mut self, path: &std::path::Path) -> bool {
         let sr = if self.audio.is_some() { self.sample_rate } else { EXPORT_SR };
+        // Synchronous: every sample is needed (waits for the ones loading in the background).
         let mut slots = Vec::new();
         for ch in &self.project.channels {
-            match build_slot(ch, sr, &mut self.cache) {
+            match build_slot(ch, sr, self.loader.cache()) {
                 Ok(k) => slots.push((ch.id, k)),
                 Err(e) => self.ui.status = trf!("{} ignoré : {e}", "{} skipped: {e}", ch.name),
             }
@@ -508,12 +544,13 @@ impl App {
     }
 
     fn load_sample_path(&mut self, target: Option<ChannelId>, path: PathBuf) {
-        let source = SampleSource::File(path.clone());
-        self.cache.invalidate(&source);
-        if let Err(e) = self.cache.get(&source, self.sample_rate) {
+        // Only the header is checked here; the file is decoded in the background (`sync_engine`).
+        if let Err(e) = samples::probe_wav(&path) {
             self.ui.status = trf!("Chargement impossible : {e}", "Cannot load: {e}");
             return;
         }
+        let source = SampleSource::File(path.clone());
+        self.loader.cache().invalidate(&source);
         let kind = ChannelKind::Sampler { source };
         match target {
             Some(id) => {
@@ -575,7 +612,7 @@ impl App {
             UiAction::LoadSample(t) => self.do_load_sample(t),
             UiAction::SelectAudio(name) => {
                 self.audio_choice = name;
-                self.cache = SampleCache::default();
+                self.loader.cache().clear();
                 self.start_audio();
                 if self.audio.is_some() {
                     self.ui.status = tr!("Sortie audio changée", "Audio output changed").into();
@@ -670,6 +707,7 @@ impl eframe::App for App {
             None => (false, 0.0),
         };
         let info = PlaybackInfo { playing, playhead, levels: self.levels.clone(), master: self.master };
+        self.ui.loading = self.loader.loading().collect();
         self.ui.can_undo = self.history.can_undo() || self.project != self.saved;
         self.ui.can_redo = self.history.can_redo();
         self.ui.dirty = self.is_dirty();
@@ -683,6 +721,7 @@ impl eframe::App for App {
         let gesture = ctx.input(|i| i.pointer.any_down()) || ctx.wants_keyboard_input();
         self.history.commit_if_changed(&self.project, gesture);
         self.sync_engine();
+        self.poll_samples();
 
         let title = format!("Sequensss — {}{}", self.ui.file_label, if self.ui.dirty { " *" } else { "" });
         if title != self.title {

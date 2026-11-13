@@ -12,7 +12,7 @@
 use eframe::egui::{self, Align2, Color32, Key, Rect, Sense, Stroke, UiBuilder, pos2, vec2};
 use seq_i18n::{tr, trf};
 use seq_model::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 mod browser;
 mod compact;
@@ -150,6 +150,8 @@ pub struct SeqUi {
     pub can_undo: bool,
     pub can_redo: bool,
     pub focus: Option<PanelId>,
+    /// Channels whose sample is loading (filled by the app every frame).
+    pub loading: HashSet<ChannelId>,
     /// Compact mode (recomputed every frame) and the panel shown in that mode.
     compact: bool,
     pub tab: PanelId,
@@ -190,6 +192,7 @@ impl SeqUi {
             can_undo: false,
             can_redo: false,
             focus: None,
+            loading: HashSet::new(),
             compact: false,
             tab: PanelId::Rack,
             pending_tab: None,
