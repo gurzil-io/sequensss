@@ -170,17 +170,19 @@ fn step_range(step: usize) -> (Tick, Tick) {
 }
 
 /// Turns a step on/off. Turning on adds a one-step note on `default_key`;
-/// turning off removes **all** notes that start in this step.
+/// turning off removes **all** notes that start in this step. A step turned on past
+/// the end of the pattern grows it to the end of that step's bar.
 pub fn set_step(project: &mut Project, pattern: PatternId, channel: ChannelId, step: usize, on: bool) {
     let key = project.channel(channel).map(|c| c.default_key).unwrap_or(60);
-    let Some(pat) = project.pattern_mut(pattern) else { return };
+    let bar = project.bar_len();
+    let Some(pat) = project.pattern(pattern) else { return };
     let (a, b) = step_range(step);
-    if a >= pat.length {
+    if on == step_is_on(pat, channel, step) {
         return;
     }
-    let currently = step_is_on(pat, channel, step);
-    if on == currently {
-        return;
+    let pat = project.pattern_mut(pattern).unwrap();
+    if on {
+        pat.length = length_for_end(pat.length, b, bar);
     }
     let notes = pat.notes.entry(channel).or_default();
     if on {
@@ -302,15 +304,51 @@ pub fn delete_pattern(project: &mut Project, pattern: PatternId) -> bool {
     true
 }
 
-/// Changes a pattern's length and removes the notes that start past it.
-pub fn set_pattern_length(project: &mut Project, pattern: PatternId, length: Tick) {
-    let Some(p) = project.pattern_mut(pattern) else { return };
-    p.length = length.max(STEP);
-    let len = p.length;
-    for notes in p.notes.values_mut() {
-        notes.retain(|n| n.start < len);
+// ---------------------------------------------------------------------------
+// Pattern length. It grows by whole bars when something is placed past the end,
+// and only shrinks when the bars removed hold no note (nothing is ever cut).
+// ---------------------------------------------------------------------------
+
+/// Length needed to hold something ending at `end`: `len`, or more, up to the end of the
+/// bar containing `end` (the last tick of the content).
+pub fn length_for_end(len: Tick, end: Tick, bar: Tick) -> Tick {
+    if end <= len { len } else { end.div_ceil(bar.max(1)) * bar.max(1) }
+}
+
+/// Length needed to hold `notes` entirely (see [`length_for_end`]), at least `len`.
+pub fn length_for_notes(len: Tick, notes: &[Note], bar: Tick) -> Tick {
+    notes.iter().fold(len, |l, n| length_for_end(l, n.start + n.len, bar))
+}
+
+/// Shortest length in whole bars (at least one) that holds every note of the pattern.
+pub fn min_pattern_length(pattern: &Pattern, bar: Tick) -> Tick {
+    pattern.notes.values().fold(bar.max(1), |l, ns| length_for_notes(l, ns, bar))
+}
+
+/// Changes a pattern's length. Refuses (`false`) a length that would cut a note.
+pub fn set_pattern_length(project: &mut Project, pattern: PatternId, length: Tick) -> bool {
+    let length = length.max(STEP);
+    let Some(p) = project.pattern(pattern) else { return false };
+    if p.length == length {
+        return true;
     }
-    p.notes.retain(|_, v| !v.is_empty());
+    if p.notes.values().flatten().any(|n| n.start + n.len > length) {
+        return false;
+    }
+    project.pattern_mut(pattern).unwrap().length = length;
+    true
+}
+
+/// Previous whole-bar length of a pattern (the "− bar" button), if it holds all the notes.
+pub fn shorter_length(pattern: &Pattern, bar: Tick) -> Option<Tick> {
+    let bar = bar.max(1);
+    let len = (pattern.length - 1) / bar * bar;
+    (len > 0 && len >= min_pattern_length(pattern, bar)).then_some(len)
+}
+
+/// Next whole-bar length of a pattern (the "+ bar" button).
+pub fn longer_length(pattern: &Pattern, bar: Tick) -> Tick {
+    (pattern.length / bar.max(1) + 1) * bar.max(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -928,6 +966,85 @@ mod tests {
         assert!(delete_pattern(&mut p, p2));
         assert!(p.arrangement.clips.is_empty());
         assert!(!delete_pattern(&mut p, pat));
+    }
+
+    #[test]
+    fn step_past_the_end_grows_to_its_bar() {
+        let (mut p, pat, ch) = setup();
+        let bar = p.bar_len();
+        assert_eq!(p.pattern(pat).unwrap().length, bar);
+        // Second step of the third bar: the pattern grows to three bars.
+        set_step(&mut p, pat, ch, 2 * 16 + 1, true);
+        let pt = p.pattern(pat).unwrap();
+        assert_eq!(pt.length, 3 * bar);
+        assert!(step_is_on(pt, ch, 33));
+        // Turning a step off never changes the length.
+        set_step(&mut p, pat, ch, 33, false);
+        set_step(&mut p, pat, ch, 80, false);
+        assert_eq!(p.pattern(pat).unwrap().length, 3 * bar);
+    }
+
+    #[test]
+    fn grow_and_note_are_one_undo_step() {
+        let (mut p, pat, ch) = setup();
+        let bar = p.bar_len();
+        let mut h = History::new(&p, 50);
+        // Painting across the end of the pattern (one gesture).
+        for step in 14..20 {
+            set_step(&mut p, pat, ch, step, true);
+            assert!(!h.commit_if_changed(&p, true));
+        }
+        assert!(h.commit_if_changed(&p, false));
+        assert_eq!(p.pattern(pat).unwrap().length, 2 * bar);
+        assert!(h.undo(&mut p));
+        let pt = p.pattern(pat).unwrap();
+        assert_eq!(pt.length, bar);
+        assert!(pt.notes.get(&ch).is_none());
+        assert!(h.redo(&mut p));
+        assert_eq!(p.pattern(pat).unwrap().length, 2 * bar);
+        assert_eq!(p.pattern(pat).unwrap().notes[&ch].len(), 6);
+    }
+
+    #[test]
+    fn length_for_notes_rounds_to_bars() {
+        let bar = 3840;
+        assert_eq!(length_for_end(bar, bar, bar), bar);
+        assert_eq!(length_for_end(bar, bar + 1, bar), 2 * bar);
+        assert_eq!(length_for_end(bar, 3 * bar, bar), 3 * bar);
+        // Odd lengths are kept until something goes past them.
+        assert_eq!(length_for_end(12 * STEP, 10 * STEP, bar), 12 * STEP);
+        assert_eq!(length_for_end(12 * STEP, 13 * STEP, bar), bar);
+        let notes = [n(0, STEP, 60), n(bar + 10, 2 * bar, 60)];
+        assert_eq!(length_for_notes(bar, &notes, bar), 4 * bar);
+        assert_eq!(length_for_notes(8 * bar, &notes, bar), 8 * bar);
+    }
+
+    #[test]
+    fn shrinking_never_cuts_notes() {
+        let (mut p, pat, ch) = setup();
+        let bar = p.bar_len();
+        assert!(set_pattern_length(&mut p, pat, 4 * bar));
+        // A note in bar 2 that overlaps bar 3 by one step.
+        p.pattern_mut(pat).unwrap().notes.insert(ch, vec![n(2 * bar - STEP, 2 * STEP, 60)]);
+        let pt = p.pattern(pat).unwrap();
+        assert_eq!(min_pattern_length(pt, bar), 3 * bar);
+        assert_eq!(shorter_length(pt, bar), Some(3 * bar));
+        assert_eq!(longer_length(pt, bar), 5 * bar);
+        assert!(set_pattern_length(&mut p, pat, 3 * bar));
+        assert_eq!(shorter_length(p.pattern(pat).unwrap(), bar), None);
+        assert!(!set_pattern_length(&mut p, pat, 2 * bar));
+        let pt = p.pattern(pat).unwrap();
+        assert_eq!(pt.length, 3 * bar);
+        assert_eq!(pt.notes[&ch].len(), 1);
+        // Empty pattern: never below one bar with the buttons.
+        p.pattern_mut(pat).unwrap().notes.clear();
+        assert_eq!(shorter_length(p.pattern(pat).unwrap(), bar), Some(2 * bar));
+        assert!(set_pattern_length(&mut p, pat, bar));
+        assert_eq!(shorter_length(p.pattern(pat).unwrap(), bar), None);
+        // Odd length (12 steps): "+" goes to the next bar, "−" is refused.
+        assert!(set_pattern_length(&mut p, pat, 12 * STEP));
+        assert_eq!(longer_length(p.pattern(pat).unwrap(), bar), bar);
+        assert_eq!(shorter_length(p.pattern(pat).unwrap(), bar), None);
     }
 
     fn n(start: Tick, len: Tick, key: u8) -> Note {
