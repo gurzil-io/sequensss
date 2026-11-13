@@ -2,9 +2,7 @@
 
 <h1 align="center">Sequensss</h1>
 
-**A lightweight MIDI sequencer and drum machine written in Rust.** It runs on Windows, macOS, Linux and Android.
-
-Sequensss takes the workflow of pattern-based DAWs (a channel rack, step sequencer, piano roll and playlist) and keeps only the parts you need to sketch a beat quickly. It is a single native binary with no installer or runtime, it plays sound as soon as it opens (the drum kits are synthesized, so no sample packs are needed), and it can drive your hardware synths over MIDI.
+<p align="center"><b>A lightweight MIDI sequencer for dawless setups: one place to drive all your hardware synths, from an Android phone or tablet.</b><br>Also runs on Windows, macOS and Linux.</p>
 
 <p align="center">
   <a href="https://github.com/gurzil-io/sequensss/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/gurzil-io/sequensss?style=for-the-badge&label=release&color=f28c28&labelColor=1e1a17"></a>
@@ -17,11 +15,28 @@ Sequensss takes the workflow of pattern-based DAWs (a channel rack, step sequenc
   <a href="https://github.com/emilk/egui"><img alt="Built with egui" src="https://img.shields.io/badge/built%20with-egui-46b03c?style=flat-square&labelColor=1e1a17"></a>
 </p>
 
+## Why
+
+I have a bunch of analog synths and wanted one central place to sequence them all. Doing it from a computer always felt like a chore: a DAW, drivers, routing, too much software between me and the knobs. Sequensss moves that brain to an Android phone or tablet. Plug in a USB MIDI interface, and each synth gets its own tracks, patterns and MIDI channel.
+
+The goal is to make life easier for dawless setups **without becoming a DAW**:
+
+- **One hub for all your synths.** Up to 8 MIDI outputs and any MIDI channel per track, with tight timing. MIDI in lets you play or record from a keyboard.
+- **In your pocket.** USB MIDI and low-latency audio on Android, with touch-friendly layouts for phones and tablets. The same app runs on desktop.
+- **Write offline, play later.** Work on your sequences anywhere (on the train, on the couch) with nothing plugged in, then connect the rig and press play. Built-in drums and a simple synth let you hear ideas without any hardware.
+- **Stays lightweight.** Patterns, a step sequencer, a piano roll, a playlist and MIDI. No audio tracks, no plugin chain, no mixer to manage. One small app that starts instantly.
+
 > **Vibe-coded, and open to everyone, forever.** Sequensss was built by vibe coding: fast, by ear, for the fun of making music software. It is MIT-licensed and will stay free and open. Fork it, hack it, bend it into your own instrument: no permission needed. See [Make it yours](#make-it-yours).
 
 ---
 
 ## Features
+
+**Driving your synths (MIDI)**
+- **MIDI out:** up to 8 outputs, a MIDI channel and an output per track. Events are scheduled against the audio output latency, so hardware and built-in sounds stay in sync.
+- **MIDI in:** play the selected track live from a keyboard, or record into a pattern with optional quantize. Notes land where you played them.
+- **USB MIDI on Android** (interfaces and controllers, hot-plug), and any MIDI port on desktop.
+- **Metronome.**
 
 **Making beats**
 - **Channel rack and step sequencer.** Click or drag to paint steps. Each channel has volume, pan, mute, solo, a level meter and a choke group (for closed/open hi-hats). Pattern length is variable, and swing is global.
@@ -36,18 +51,15 @@ Sequensss takes the workflow of pattern-based DAWs (a channel rack, step sequenc
 - **Undo/redo.** One gesture is one undo step, with up to 200 steps.
 - **Paintbrush tool** in both the piano roll and the playlist.
 
-**MIDI and audio**
-- **MIDI in:** play the selected channel live from a keyboard, or record into a pattern with optional quantize.
-- **MIDI out:** sequence external synths. Events are timestamped against the audio output latency.
-- **Real-time-safe audio engine:** no locks and no allocations in the audio callback, with sample-accurate event timing whatever the buffer size.
-- **Metronome.**
+**Audio engine**
+- **Real-time safe:** no locks and no allocations in the audio callback, with sample-accurate event timing whatever the buffer size.
 
 **Files**
 - Projects are saved as human-readable `.ron` files, written atomically.
 - Export to **WAV** (16-bit) and **Standard MIDI File** (one track per channel).
 
 **Android**
-- Low-latency audio through Oboe/AAudio, and **USB MIDI** controllers through the Android MidiManager.
+- Low-latency audio through Oboe/AAudio, and **USB MIDI** through the Android MidiManager.
 - Touch gestures, a full-screen mode, and layouts for tablets and phones.
 - A built-in project browser, WAV import, and sharing of exports through the Android share sheet.
 
@@ -172,12 +184,18 @@ crates/
 
 ## Roadmap
 
-These features are out of scope for v0.1 and could come later:
-- VST3 / CLAP plugin hosting
-- A mixer with effects
-- Automation and tempo changes
-- MIDI clock sync
-- Audio recording
+The compass: **make dawless setups easier, stay light.** A feature gets in if it helps drive hardware, or makes sketching sequences faster, without turning Sequensss into a DAW.
+
+**Next, for the hardware rig**
+- **MIDI clock out** (24 PPQN, Start/Stop) to keep drum machines, arpeggiators and grooveboxes in sync ([#4](https://github.com/gurzil-io/sequensss/issues/4)).
+- **Swap a track between a built-in sound and MIDI out** while keeping its notes: sketch on the built-in synth, then send it to the real one ([#9](https://github.com/gurzil-io/sequensss/issues/9)).
+
+**Ideas, only if they stay optional and lightweight**
+- Automation and tempo changes ([#6](https://github.com/gurzil-io/sequensss/issues/6)).
+- A small mixer with a few effects for the built-in sounds ([#5](https://github.com/gurzil-io/sequensss/issues/5)).
+- VST3 / CLAP plugins on desktop ([#7](https://github.com/gurzil-io/sequensss/issues/7)).
+
+**Not planned:** audio recording, audio tracks and other full-DAW features. Your synths stay the sound source.
 
 ---
 
