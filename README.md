@@ -6,8 +6,16 @@
 
 Sequensss takes the workflow of pattern-based DAWs (a channel rack, step sequencer, piano roll and playlist) and keeps only the parts you need to sketch a beat quickly. It is a single native binary with no installer or runtime, it plays sound as soon as it opens (the drum kits are synthesized, so no sample packs are needed), and it can drive your hardware synths over MIDI.
 
-[![CI](https://github.com/gurzil-io/sequensss/actions/workflows/ci.yml/badge.svg)](https://github.com/gurzil-io/sequensss/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/gurzil-io/sequensss/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/gurzil-io/sequensss?style=for-the-badge&label=release&color=f28c28&labelColor=1e1a17"></a>
+  <a href="https://github.com/gurzil-io/sequensss/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/gurzil-io/sequensss/total?style=for-the-badge&label=downloads&color=46b03c&labelColor=1e1a17"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-efe6d0?style=for-the-badge&labelColor=1e1a17"></a>
+</p>
+<p align="center">
+  <a href="#download"><img alt="Platforms: Windows, macOS, Linux, Android" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux%20%C2%B7%20Android-4e2c16?style=flat-square&labelColor=1e1a17"></a>
+  <a href="https://www.rust-lang.org"><img alt="Rust 1.85+" src="https://img.shields.io/badge/Rust-1.85%2B-f28c28?style=flat-square&logo=rust&logoColor=white&labelColor=1e1a17"></a>
+  <a href="https://github.com/emilk/egui"><img alt="Built with egui" src="https://img.shields.io/badge/built%20with-egui-46b03c?style=flat-square&labelColor=1e1a17"></a>
+</p>
 
 ---
 
