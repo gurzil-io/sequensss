@@ -18,6 +18,8 @@ pub struct Pointer {
     pub shift: bool,
     /// Ctrl (Windows/Linux) or Cmd (macOS).
     pub command: bool,
+    /// Input time (seconds).
+    pub time: f64,
 }
 
 impl Pointer {
@@ -36,6 +38,7 @@ impl Pointer {
                 multi: touch.is_some(),
                 shift: i.modifiers.shift,
                 command: i.modifiers.command,
+                time: i.time,
             }
         })
     }

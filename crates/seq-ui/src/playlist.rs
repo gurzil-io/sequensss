@@ -28,6 +28,13 @@ enum Drag {
     Paint { brush: Clip, last: i64, before: Vec<Clip> },
 }
 
+/// Menu opened by a double tap: on a palette pattern, or on a clip (index).
+#[derive(Clone, Copy, PartialEq)]
+enum TapMenu {
+    Pattern(PatternId),
+    Clip(usize),
+}
+
 pub struct PlaylistState {
     scroll_x: f32,
     scroll_y: f32,
@@ -43,6 +50,10 @@ pub struct PlaylistState {
     /// Brush tool: press on a clip then drag = end-to-end copies; on empty space =
     /// clips of the selected pattern.
     paint: bool,
+    menu: Option<TapMenu>,
+    /// Clip created by a tap on empty space, and when: the second tap of a double tap
+    /// there must not open its menu.
+    fresh: Option<(usize, f64)>,
 }
 
 impl Default for PlaylistState {
@@ -57,6 +68,8 @@ impl Default for PlaylistState {
             seen: None,
             clipboard: Vec::new(),
             paint: false,
+            menu: None,
+            fresh: None,
         }
     }
 }
@@ -146,6 +159,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         .collect();
 
     // --- Palette ---
+    let menu_id = ui.make_persistent_id("timeline_tap_menu");
+    let mut tiles: Vec<(PatternId, Rect)> = Vec::new();
     {
         let p = ui.painter();
         skin::caption(p, palette.left_top() + vec2(0.0, 7.0), Align2::LEFT_CENTER, "PATTERNS", TEXT_DIMMER);
@@ -163,9 +178,18 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             p.rect_stroke(r, 7.0, if sel { Stroke::new(2.0_f32, ORANGE) } else { Stroke::new(1.0_f32, EDGE) });
             p.rect_filled(Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(12.0, 12.0)), 3.0, id_color(pat.id.0));
             p.with_clip_rect(r.shrink(2.0)).text(pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &pat.name, body(15.0), TEXT);
-            if resp.on_hover_text(tr!("Sélectionner, puis cliquer dans la timeline pour le poser", "Select, then click in the timeline to place it")).clicked() {
+            let resp = resp.on_hover_text(tr!(
+                "Sélectionner, puis cliquer dans la timeline pour le poser · double-clic : supprimer…",
+                "Select, then click in the timeline to place it · double-click: delete…"
+            ));
+            if resp.clicked() {
                 st.pattern = pat.id;
             }
+            if resp.double_clicked() {
+                st.playlist.menu = Some(TapMenu::Pattern(pat.id));
+                ui.memory_mut(|m| m.open_popup(menu_id));
+            }
+            tiles.push((pat.id, r));
             if i % 2 == 1 {
                 y += tile_h + 6.0;
             }
@@ -236,6 +260,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let clips = &mut project.arrangement.clips;
     if ps.seen.as_ref() != Some(&*clips) {
         ps.selected.clear();
+        if matches!(ps.menu, Some(TapMenu::Clip(_))) {
+            ps.menu = None;
+        }
         if matches!(ps.drag, Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Marquee { .. })) {
             ps.drag = None;
         }
@@ -350,6 +377,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                             let start = snap_floor(t, snap);
                             clips.push(Clip { pattern: st.pattern, track: track_of(pos.y), start, len: *len });
                             let idx = clips.len() - 1;
+                            ps.fresh = Some((idx, pointer.time));
                             ps.selected = vec![idx];
                             let orig = snapshot_of(clips, &ps.selected);
                             ps.drag = Some(Drag::Move { anchor: idx, grab: t as i64 - start as i64, orig, fresh: true });
@@ -364,6 +392,20 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 ps.drag = Some(Drag::Erase);
             }
         }
+    }
+
+    // --- Double tap on a clip: its menu (not on a clip just created by the first tap) ---
+    if pointer.double_clicked
+        && !ps.paint
+        && !pointer.shift
+        && !pointer.command
+        && let Some(pos) = pointer.pos.filter(|p| resp.hovered() && grid.contains(*p))
+        && let Some(idx) = hit(clips, pos)
+        && !ps.fresh.is_some_and(|(i, t)| i == idx && pointer.time - t < 1.0)
+    {
+        st.pattern = clips[idx].pattern;
+        ps.menu = Some(TapMenu::Clip(idx));
+        ui.memory_mut(|m| m.open_popup(menu_id));
     }
 
     // --- Mouse: drag / release ---
@@ -538,7 +580,63 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     }
     p.rect_stroke(arr, 8.0, Stroke::new(1.0_f32, EDGE));
 
+    let anchor = match st.playlist.menu {
+        Some(TapMenu::Pattern(id)) => tiles.iter().find(|(t, _)| *t == id).map(|(_, r)| *r),
+        Some(TapMenu::Clip(i)) => project.arrangement.clips.get(i).map(|c| clip_rect(c).intersect(grid)),
+        None => None,
+    };
+    match anchor {
+        Some(r) if ui.memory(|m| m.is_popup_open(menu_id)) => tap_menu(st, ui, menu_id, r, project),
+        Some(_) => st.playlist.menu = None,
+        None => {
+            // Pattern or clip gone (undo, deletion elsewhere): the menu goes too.
+            if st.playlist.menu.take().is_some() && ui.memory(|m| m.is_popup_open(menu_id)) {
+                ui.memory_mut(|m| m.close_popup());
+            }
+        }
+    }
+
     st.actions.extend(actions);
+}
+
+/// Double-tap menu (palette pattern or clip). Deleting goes through a menu, never
+/// straight from the double tap: a stray double touch must not remove anything.
+fn tap_menu(st: &mut SeqUi, ui: &mut Ui, id: egui::Id, anchor: Rect, project: &mut Project) {
+    let Some(menu) = st.playlist.menu else { return };
+    let pat = match menu {
+        TapMenu::Pattern(p) => p,
+        TapMenu::Clip(i) => project.arrangement.clips[i].pattern,
+    };
+    let Some(name) = project.pattern(pat).map(|p| p.name.clone()) else { return };
+    let uses = project.arrangement.clips.iter().filter(|c| c.pattern == pat).count();
+    let anchor = ui.interact(anchor, id.with("anchor"), Sense::hover());
+    let mut done = false;
+    egui::popup_below_widget(ui, id, &anchor, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+        ui.set_min_width(260.0);
+        skin::menu_caption(ui, &name.to_uppercase());
+        if let TapMenu::Clip(i) = menu
+            && skin::menu_item(ui, tr!("Supprimer ce clip", "Delete this clip"), DANGER, false).clicked()
+        {
+            seq_edit::delete_clips(&mut project.arrangement.clips, &[i]);
+            done = true;
+        }
+        let label = match uses {
+            0 => tr!("Supprimer le pattern", "Delete pattern").to_string(),
+            1 => tr!("Supprimer le pattern et son clip", "Delete pattern and its clip").to_string(),
+            n => trf!("Supprimer le pattern et ses {} clips", "Delete pattern and its {} clips", n),
+        };
+        if skin::menu_item(ui, &label, DANGER, false).clicked() {
+            if !seq_edit::delete_pattern(project, pat) {
+                st.status = tr!("Impossible de supprimer le dernier pattern", "Can't delete the last pattern").into();
+            }
+            done = true;
+        }
+    });
+    if done {
+        st.playlist.menu = None;
+        st.playlist.selected.clear();
+        ui.memory_mut(|m| m.close_popup());
+    }
 }
 
 fn fmt_bar(t: Tick, bar: Tick) -> String {
