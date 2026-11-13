@@ -175,6 +175,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 if skin::menu_item(ui, tr!("Remplacer par…", "Replace with…"), TEXT, false).clicked() {
                     st.replacing = Some(ch.id);
                 }
+                note_clipboard_items(st, ui, project, pat_id, ch.id);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let w = (ui.available_width() - 4.0) / 2.0;
@@ -224,6 +225,42 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         Some(RowOp::Move(id, up)) => seq_edit::move_channel(project, id, up),
         None => {}
     }
+}
+
+/// Channel menu: copy / cut / paste the channel's notes in the current pattern, on one
+/// row without a caption (the menu must fit a phone in landscape). Paste replaces the channel's notes
+/// (one undo step), at the copied positions.
+fn note_clipboard_items(st: &mut SeqUi, ui: &mut Ui, project: &mut Project, pat: PatternId, ch: ChannelId) {
+    let has_notes = project.pattern(pat).is_some_and(|p| p.notes.get(&ch).is_some_and(|n| !n.is_empty()));
+    let n_clip = st.channel_clipboard.len();
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let w = (ui.available_width() - 8.0) / 3.0;
+        let items = [(0, tr!("Copier notes", "Copy notes"), has_notes), (1, tr!("Couper notes", "Cut notes"), has_notes), (2, tr!("Coller notes", "Paste notes"), n_clip > 0)];
+        for (i, label, enabled) in items {
+            ui.add_enabled_ui(enabled, |ui| {
+                let resp = skin::text_button(ui, vec2(w, 44.0), Kind::Dark, label, body(14.0));
+                let resp = if i == 2 && enabled { resp.on_hover_text(trf!("Remplace les notes du channel par les {} notes copiées", "Replaces the channel's notes with the {} copied notes", n_clip)) } else { resp };
+                if resp.clicked() {
+                    chosen = Some(i);
+                }
+            });
+        }
+    });
+    match chosen {
+        Some(0) => {
+            st.channel_clipboard = seq_edit::channel_notes(project, pat, ch);
+            st.status = trf!("{} notes copiées", "{} notes copied", st.channel_clipboard.len());
+        }
+        Some(1) => {
+            st.channel_clipboard = seq_edit::cut_channel_notes(project, pat, ch);
+            st.status = trf!("{} notes coupées", "{} notes cut", st.channel_clipboard.len());
+        }
+        Some(_) => seq_edit::replace_channel_notes(project, pat, ch, &st.channel_clipboard),
+        None => return,
+    }
+    ui.close_menu();
 }
 
 /// Channel menu, "Replace with" page: another instrument for the channel, which keeps

@@ -179,6 +179,9 @@ pub struct SeqUi {
     /// Channel menu showing the "Replace with" choices.
     replacing: Option<ChannelId>,
     step_paint: Option<(ChannelId, bool)>,
+    /// Notes copied from a channel in the rack, at their positions in the pattern.
+    /// Separate from the piano roll clipboard, which holds a selection relative to its start.
+    channel_clipboard: Vec<Note>,
     /// "Preview" button held down: (channel, key) in progress.
     audition: Option<(ChannelId, u8)>,
     piano: PianoState,
@@ -223,6 +226,7 @@ impl SeqUi {
             renaming_channel: None,
             replacing: None,
             step_paint: None,
+            channel_clipboard: Vec::new(),
             audition: None,
             piano: PianoState::default(),
             playlist: PlaylistState::default(),
@@ -246,7 +250,9 @@ impl SeqUi {
         let status = std::mem::take(&mut self.status);
         let update = self.update.take();
         let (focus, tab, check_updates) = (self.focus, self.tab, self.check_updates);
+        let clipboard = std::mem::take(&mut self.channel_clipboard);
         *self = SeqUi::new(project);
+        self.channel_clipboard = clipboard;
         self.devices = devices;
         self.status = status;
         self.update = update;

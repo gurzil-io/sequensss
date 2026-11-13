@@ -293,6 +293,44 @@ pub fn set_pattern_length(project: &mut Project, pattern: PatternId, length: Tic
 }
 
 // ---------------------------------------------------------------------------
+// A channel's notes in a pattern (channel rack copy / cut / paste)
+// ---------------------------------------------------------------------------
+
+/// The channel's notes in the pattern, at their positions in the pattern.
+pub fn channel_notes(project: &Project, pattern: PatternId, channel: ChannelId) -> Vec<Note> {
+    project.pattern(pattern).and_then(|p| p.notes.get(&channel)).cloned().unwrap_or_default()
+}
+
+/// Removes the channel's notes from the pattern and returns them.
+pub fn cut_channel_notes(project: &mut Project, pattern: PatternId, channel: ChannelId) -> Vec<Note> {
+    let has = project.pattern(pattern).is_some_and(|p| p.notes.contains_key(&channel));
+    if !has {
+        return Vec::new();
+    }
+    project.pattern_mut(pattern).and_then(|p| p.notes.remove(&channel)).unwrap_or_default()
+}
+
+/// Replaces the channel's notes in the pattern with `notes` (same positions). Notes that
+/// start past the end of the pattern are dropped; lengths are truncated at the end.
+pub fn replace_channel_notes(project: &mut Project, pattern: PatternId, channel: ChannelId, notes: &[Note]) {
+    let Some(len) = project.pattern(pattern).map(|p| p.length) else { return };
+    let new: Vec<Note> = notes
+        .iter()
+        .filter(|n| n.start < len)
+        .map(|n| Note { len: n.len.min(len - n.start).max(1), ..*n })
+        .collect();
+    if project.pattern(pattern).and_then(|p| p.notes.get(&channel)).map_or(new.is_empty(), |cur| *cur == new) {
+        return;
+    }
+    let p = project.pattern_mut(pattern).unwrap();
+    if new.is_empty() {
+        p.notes.remove(&channel);
+    } else {
+        p.notes.insert(channel, new);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Note selection (piano roll). `sel` = indices into `notes`.
 // ---------------------------------------------------------------------------
 
@@ -873,6 +911,51 @@ mod tests {
 
     fn n(start: Tick, len: Tick, key: u8) -> Note {
         Note { start, len, key, velocity: 100 }
+    }
+
+    #[test]
+    fn channel_notes_copy_cut_paste() {
+        let (mut p, pat, kick) = setup();
+        let synth = p.add_channel("s", ChannelKind::Synth(SynthParams::default())).unwrap();
+        set_step(&mut p, pat, kick, 0, true);
+        set_step(&mut p, pat, kick, 4, true);
+        let copied = channel_notes(&p, pat, kick);
+        assert_eq!(copied.len(), 2);
+        assert!(channel_notes(&p, pat, synth).is_empty());
+
+        // Paste replaces the target's notes, at the same positions.
+        p.pattern_mut(pat).unwrap().notes.insert(synth, vec![n(STEP, STEP, 40)]);
+        replace_channel_notes(&mut p, pat, synth, &copied);
+        assert_eq!(channel_notes(&p, pat, synth), copied);
+
+        // Cut empties the channel; the other one keeps its notes.
+        assert_eq!(cut_channel_notes(&mut p, pat, kick), copied);
+        assert!(!p.pattern(pat).unwrap().notes.contains_key(&kick));
+        assert_eq!(channel_notes(&p, pat, synth), copied);
+        assert!(cut_channel_notes(&mut p, pat, kick).is_empty());
+
+        // Pasting nothing clears the channel.
+        replace_channel_notes(&mut p, pat, synth, &[]);
+        assert!(p.pattern(pat).unwrap().notes.is_empty());
+    }
+
+    #[test]
+    fn paste_channel_notes_fits_shorter_pattern() {
+        let (mut p, pat, ch) = setup();
+        let bar = p.bar_len();
+        set_pattern_length(&mut p, pat, bar);
+        let notes = [n(0, STEP, 60), n(bar - STEP, 4 * STEP, 62), n(bar, STEP, 64)];
+        replace_channel_notes(&mut p, pat, ch, &notes);
+        assert_eq!(channel_notes(&p, pat, ch), vec![n(0, STEP, 60), n(bar - STEP, STEP, 62)]);
+    }
+
+    #[test]
+    fn paste_same_notes_keeps_pattern_shared() {
+        let (mut p, pat, ch) = setup();
+        set_step(&mut p, pat, ch, 2, true);
+        let before = p.clone();
+        replace_channel_notes(&mut p, pat, ch, &channel_notes(&before, pat, ch));
+        assert!(CowArc::ptr_eq(&before.patterns[0], &p.patterns[0]));
     }
 
     #[test]
