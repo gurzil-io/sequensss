@@ -112,7 +112,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) {
                     (Some(_), false) => RED,
                 };
                 let text = port.clone().unwrap_or_else(|| tr!("Aucun port", "No port").into());
-                let dw = (w - 64.0 - 44.0 - 12.0).max(80.0);
+                // Narrow column (phone): smaller clock toggle.
+                let (cw, cf) = if w < 340.0 { (56.0, 12.5) } else { (76.0, 15.0) };
+                let dw = (w - 64.0 - cw - 44.0 - 18.0).max(80.0);
                 skin::dropdown(ui, ("dd_out", i), vec2(dw, 44.0), Some((led, true)), &text, None, |ui| {
                     if skin::menu_item(ui, tr!("↻ Rafraîchir la liste", "↻ Refresh list"), TEXT_DIM, false).clicked() {
                         st.actions.push(UiAction::RefreshDevices);
@@ -139,6 +141,18 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) {
                         ""
                     }
                 ));
+                let clock = project.midi_clock(i);
+                if skin::button(ui, vec2(cw, 44.0), Kind::Tile, clock, |p, r, c| {
+                    p.text(r.center(), Align2::CENTER_CENTER, tr!("HORLOGE", "CLOCK"), cond(cf), c);
+                })
+                .on_hover_text(tr!(
+                    "Envoyer l'horloge MIDI et Start / Stop / Continue sur cette sortie (boîtes à rythmes, arpégiateurs…)",
+                    "Send MIDI clock and Start / Stop / Continue on this output (drum machines, arpeggiators…)"
+                ))
+                .clicked()
+                {
+                    project.set_midi_clock(i, !clock);
+                }
                 ui.add_enabled_ui(project.midi_outs.len() > 1, |ui| {
                     if skin::icon_button(ui, vec2(44.0, 44.0), Kind::Tile, Icon::Close, 16.0).on_hover_text(tr!("Supprimer cette sortie", "Remove this output")).clicked() {
                         remove = Some(i);
@@ -154,20 +168,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) {
         }
     });
 
-    // Removing an output: channels that targeted it move to OUT 1,
-    // those on the following outputs are shifted down.
     if let Some(i) = remove {
-        project.midi_outs.remove(i);
-        for c in project.channels.iter_mut().filter(|c| matches!(c.kind, ChannelKind::MidiOut { out, .. } if out as usize >= i)) {
-            if let ChannelKind::MidiOut { out, .. } = &mut c.make_mut().kind {
-                let o = *out as usize;
-                if o == i {
-                    *out = 0;
-                } else if o > i {
-                    *out -= 1;
-                }
-            }
-        }
+        project.remove_midi_out(i);
     }
 }
 

@@ -7,6 +7,22 @@
 //!
 //! Note-offs are not in the graph: the engine generates them from the note's length
 //! (active notes table). A graph swap therefore cannot leave a stuck note.
+//!
+//! MIDI clock (outputs enabled in `PlaybackGraph::clock_outs`): 24 pulses per quarter,
+//! placed on exact frames like notes, never swung. The pulse stream is continuous in
+//! ticks from the origin (rebased like note ends), so loop wraps and tempo changes keep a
+//! steady interval. Transport:
+//! - Play at tick 0 → Start, then the first pulse on the same frame (Start always means
+//!   the song start).
+//! - Play anywhere else (resume after Pause, Song mode loop start) → SPP for the next
+//!   sixteenth right away, then Continue just before the pulse on that sixteenth.
+//! - Pause / Stop → Stop.
+//! - Seek, mode change or forced jump while playing → Stop, SPP, Continue (as above).
+//! - Loop wrap: pulses go on. In Song mode an SPP for the loop start precedes the first
+//!   pulse after the wrap (devices that honour SPP while running relocate, the others
+//!   ignore it); not in Pattern mode, where gear usually loops its own patterns.
+//! - Clock enabled on an output while playing → SPP + Continue on that output; disabled
+//!   → Stop. No clock while stopped.
 
 use crate::MAX_BLOCK;
 use crate::arp::ArpState;
@@ -82,6 +98,7 @@ pub struct MidiInMsg {
 pub struct MidiOutMsg {
     /// Index of the MIDI output (`Project::midi_outs`).
     pub port: u8,
+    /// Status + data, padded with zeros: the length follows the status (`midi_msg_len`).
     pub bytes: [u8; 3],
     /// Start of the audio callback that produced the message.
     pub time: Instant,
@@ -160,6 +177,33 @@ struct Active {
 }
 
 const METRO: u16 = u16::MAX;
+
+/// MIDI clock: 24 pulses per quarter note.
+const CLOCK_TICKS: f64 = (PPQ / 24) as f64;
+/// Song Position Pointer unit: a sixteenth note.
+const SPP_TICKS: f64 = (PPQ / 4) as f64;
+const EPS: f64 = 1e-6;
+const CLOCK: u8 = 0xF8;
+const START: u8 = 0xFA;
+const CONTINUE: u8 = 0xFB;
+const STOP: u8 = 0xFC;
+
+/// Song Position Pointer (position in sixteenths, 14 bits).
+fn spp(sixteenths: f64) -> [u8; 3] {
+    let v = sixteenths.round().clamp(0.0, 16383.0) as u16;
+    [0xF2, (v & 0x7F) as u8, (v >> 7) as u8]
+}
+
+/// Length in bytes of a MIDI message, from its status byte (`MidiOutMsg::bytes` is
+/// padded to 3 bytes).
+pub fn midi_msg_len(status: u8) -> usize {
+    match status {
+        0x80..=0xBF | 0xE0..=0xEF | 0xF2 => 3,
+        0xC0..=0xDF | 0xF1 | 0xF3 => 2,
+        _ => 1,
+    }
+}
+
 const MAX_PENDING: usize = 4096;
 const MAX_ACTIVE: usize = 1024;
 
@@ -222,6 +266,16 @@ pub struct Engine {
     /// Monotonic clock (frames) at the start of the current block, playing or not: drives the arpeggios.
     clock: u64,
 
+    /// MIDI outputs sending clock (bit i = output i), from the graph.
+    clock_outs: u8,
+    /// Next clock pulse, in ticks from the origin (rebased like `Active::end`).
+    clock_next: f64,
+    /// Song position of the last pulse (detects loop wraps).
+    clock_last: f64,
+    /// Start / Continue per output, sent just before the first pulse at or after the tick
+    /// (from the origin).
+    clock_cue: [Option<(f64, u8)>; MAX_MIDI_OUTS],
+
     metronome: bool,
     click: Click,
     live_channel: Option<ChannelId>,
@@ -275,6 +329,10 @@ impl Engine {
             frames: 0,
             spt: samples_per_tick(sr, 120.0),
             clock: 0,
+            clock_outs: 0,
+            clock_next: 0.0,
+            clock_last: 0.0,
+            clock_cue: [None; MAX_MIDI_OUTS],
             metronome: false,
             click: Click::new(sr as f32),
             live_channel: None,
@@ -372,6 +430,7 @@ impl Engine {
                     self.normalize_origin();
                     self.playing = true;
                     self.frames = 0;
+                    self.clock_restart();
                 }
             }
             EngineCmd::Pause => {
@@ -379,6 +438,7 @@ impl Engine {
                     let pos = self.position();
                     self.kill_seq_notes();
                     self.flush_all_arps();
+                    self.clock_stop(self.clock_outs);
                     self.playing = false;
                     self.s0 = pos;
                     self.frames = 0;
@@ -387,6 +447,9 @@ impl Engine {
             EngineCmd::Stop => {
                 self.kill_seq_notes();
                 self.flush_all_arps();
+                if self.playing {
+                    self.clock_stop(self.clock_outs);
+                }
                 self.playing = false;
                 self.s0 = self.region_start();
                 self.frames = 0;
@@ -397,6 +460,7 @@ impl Engine {
                 self.s0 = t.max(0.0);
                 self.frames = 0;
                 self.normalize_origin();
+                self.clock_jump();
             }
             EngineCmd::SetMode(m) => {
                 if m != self.mode {
@@ -405,21 +469,37 @@ impl Engine {
                     self.mode = m;
                     self.s0 = self.region_start();
                     self.frames = 0;
+                    self.clock_jump();
                 }
             }
             EngineCmd::SetLoop(l) => {
                 self.rebase();
+                let before = self.s0;
                 self.loop_region = l.filter(|(a, b)| b > a);
                 self.normalize_origin();
+                if self.s0 != before {
+                    self.clock_jump();
+                }
             }
             EngineCmd::SwapGraph(g) => {
                 self.rebase();
+                let before = self.s0;
+                let old_clock = std::mem::replace(&mut self.clock_outs, g.clock_outs);
                 self.spt = samples_per_tick(self.sr, g.tempo_bpm);
                 if let Some(old) = self.graph.replace(g) {
                     self.trash(Garbage::Graph(old));
                 }
                 self.refresh_slots();
                 self.normalize_origin();
+                if self.playing {
+                    // Outputs switched off stop; switched on, they join at the current position.
+                    self.clock_stop(old_clock & !self.clock_outs);
+                    if self.s0 != before {
+                        self.clock_jump();
+                    } else {
+                        self.clock_locate(self.clock_outs & !old_clock);
+                    }
+                }
             }
             EngineCmd::SetSlot(id, kind) => {
                 if let Some(i) = self.slot_index(id) {
@@ -538,6 +618,10 @@ impl Engine {
         for a in self.active.iter_mut().filter(|a| !a.live) {
             a.end -= d;
         }
+        self.clock_next -= d;
+        for c in self.clock_cue.iter_mut().flatten() {
+            c.0 -= d;
+        }
         self.frames = 0;
     }
 
@@ -549,6 +633,102 @@ impl Engine {
             if self.s0 >= l1 {
                 self.s0 = l0;
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // MIDI clock
+    // ------------------------------------------------------------------
+
+    fn clock_send(&mut self, mask: u8, bytes: [u8; 3], at: usize) {
+        for port in 0..MAX_MIDI_OUTS as u8 {
+            if mask >> port & 1 == 1 {
+                self.midi_send(port, bytes, at);
+            }
+        }
+    }
+
+    fn clock_stop(&mut self, mask: u8) {
+        self.clock_send(mask, [STOP, 0, 0], 0);
+        for (port, c) in self.clock_cue.iter_mut().enumerate() {
+            if mask >> port & 1 == 1 {
+                *c = None;
+            }
+        }
+    }
+
+    /// Ticks from the origin (`frames` = 0) to the next sixteenth at or after `s0`.
+    fn next_sixteenth(&self) -> f64 {
+        (((self.s0 - EPS) / SPP_TICKS).ceil().max(0.0) * SPP_TICKS - self.s0).max(0.0)
+    }
+
+    /// Playback (re)starts at the origin: the pulse grid is aligned on the next sixteenth
+    /// and every clock output is cued.
+    fn clock_restart(&mut self) {
+        let b = self.next_sixteenth();
+        let k = (b / CLOCK_TICKS + EPS).floor();
+        self.clock_next = (b - k * CLOCK_TICKS).max(0.0);
+        self.clock_last = self.s0;
+        self.clock_cue = [None; MAX_MIDI_OUTS];
+        self.clock_locate(self.clock_outs);
+    }
+
+    /// Cues outputs `mask` at the origin: Start at tick 0, otherwise SPP now and Continue
+    /// on the next sixteenth.
+    fn clock_locate(&mut self, mask: u8) {
+        if mask == 0 {
+            return;
+        }
+        let b = self.next_sixteenth();
+        let status = if self.s0 < EPS {
+            START
+        } else {
+            self.clock_send(mask, spp((self.s0 + b) / SPP_TICKS), 0);
+            CONTINUE
+        };
+        for (port, c) in self.clock_cue.iter_mut().enumerate() {
+            if mask >> port & 1 == 1 {
+                *c = Some((b, status));
+            }
+        }
+    }
+
+    /// The position jumped while playing (origin moved, `frames` = 0).
+    fn clock_jump(&mut self) {
+        if self.playing {
+            self.clock_stop(self.clock_outs);
+            self.clock_restart();
+        }
+    }
+
+    /// Clock pulses (preceded by the cued transport messages) of block `[frames, frames + n)`.
+    fn clock_block(&mut self, n: usize) {
+        loop {
+            let f = (self.clock_next * self.spt).ceil() as i64 - self.frames as i64;
+            if f >= n as i64 {
+                break;
+            }
+            let at = f.max(0) as usize;
+            let pos = self.song_at(self.clock_next);
+            let wrapped = pos < self.clock_last - EPS && self.mode == PlayMode::Song;
+            let wrap_spp = Some(pos / SPP_TICKS).filter(|s| wrapped && (s - s.round()).abs() < EPS);
+            self.clock_last = pos;
+            for port in 0..MAX_MIDI_OUTS {
+                if self.clock_outs >> port & 1 == 0 {
+                    continue;
+                }
+                if let Some(s) = wrap_spp {
+                    self.midi_send(port as u8, spp(s), at);
+                }
+                if let Some((t, status)) = self.clock_cue[port] {
+                    if t <= self.clock_next + EPS {
+                        self.midi_send(port as u8, [status, 0, 0], at);
+                        self.clock_cue[port] = None;
+                    }
+                }
+                self.midi_send(port as u8, [CLOCK, 0, 0], at);
+            }
+            self.clock_next += CLOCK_TICKS;
         }
     }
 
@@ -876,6 +1056,8 @@ impl Engine {
     fn render_block(&mut self, n: usize) {
         self.pending.clear();
         if self.playing {
+            // First: at equal frames, clock and transport go out before the notes.
+            self.clock_block(n);
             self.gather(n);
             self.pending.sort_unstable_by_key(|p| (p.offset, p.chan, p.key));
         }
@@ -1881,6 +2063,282 @@ mod tests {
         callback(&mut e, 512, 0.0);
         let msgs: Vec<(u8, [u8; 3])> = drain(&mut rx).iter().map(|m| (m.0, m.1)).collect();
         assert_eq!(msgs, vec![(0, [0x90, 60, 100]), (0, [0x80, 60, 0])]);
+    }
+
+    // ------------------------------------------------------------------
+    // MIDI clock
+    // ------------------------------------------------------------------
+
+    const F8: [u8; 3] = [0xF8, 0, 0];
+    const FA: [u8; 3] = [0xFA, 0, 0];
+    const FB: [u8; 3] = [0xFB, 0, 0];
+    const FC: [u8; 3] = [0xFC, 0, 0];
+
+    /// `outs` MIDI outputs, clock on `clock`, a one-bar pattern.
+    fn clock_project(outs: usize, clock: &[usize], tempo: f64) -> Project {
+        let mut p = Project::empty();
+        p.tempo_bpm = tempo;
+        p.midi_outs = vec![None; outs];
+        for &i in clock {
+            p.set_midi_clock(i, true);
+        }
+        p
+    }
+
+    fn clock_engine(p: &Project, sr: u32, mode: PlayMode) -> (Engine, Consumer<MidiOutMsg>) {
+        let (tx, rx) = RingBuffer::new(1 << 16);
+        let (mut e, _h) = Engine::new(sr, None, Some(tx));
+        e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(p))));
+        e.handle_cmd(EngineCmd::SetMode(mode));
+        (e, rx)
+    }
+
+    /// Absolute frame of each message (`t` = frame at the start, advanced), latency 0.
+    struct Run {
+        t: u64,
+        msgs: Vec<(u64, u8, [u8; 3])>,
+    }
+
+    impl Run {
+        fn new() -> Self {
+            Run { t: 0, msgs: Vec::new() }
+        }
+
+        fn go(&mut self, e: &mut Engine, rx: &mut Consumer<MidiOutMsg>, frames: usize, blocks: &[usize]) {
+            let sr = e.sr;
+            let mut done = 0;
+            let mut i = 0;
+            let mut buf = vec![0.0f32; 2 * blocks.iter().max().unwrap()];
+            while done < frames {
+                let n = blocks[i % blocks.len()].min(frames - done);
+                e.process(&mut buf[..2 * n], 2, 0.0);
+                while let Ok(m) = rx.pop() {
+                    self.msgs.push((self.t + (m.delay_secs * sr).round() as u64, m.port, m.bytes));
+                }
+                self.t += n as u64;
+                done += n;
+                i += 1;
+            }
+        }
+
+        fn take(&mut self) -> Vec<(u64, u8, [u8; 3])> {
+            std::mem::take(&mut self.msgs)
+        }
+    }
+
+    fn pulse_frames(msgs: &[(u64, u8, [u8; 3])], port: u8) -> Vec<u64> {
+        msgs.iter().filter(|m| m.1 == port && m.2 == F8).map(|m| m.0).collect()
+    }
+
+    #[test]
+    fn midi_msg_len_follows_status() {
+        assert_eq!(midi_msg_len(0x93), 3);
+        assert_eq!(midi_msg_len(0xC2), 2);
+        assert_eq!(midi_msg_len(0xF2), 3);
+        for s in [0xF8, 0xFA, 0xFB, 0xFC] {
+            assert_eq!(midi_msg_len(s), 1);
+        }
+        assert_eq!(spp(5.0), [0xF2, 5, 0]);
+        assert_eq!(spp(300.0), [0xF2, 44, 2]);
+    }
+
+    #[test]
+    fn clock_pulses_on_exact_frames() {
+        for &sr in &[44_100u32, 48_000] {
+            for &tempo in &[120.0, 133.0, 90.5] {
+                for blocks in [&[512usize][..], &[333], &[64], &[100, 1000, 7]] {
+                    let p = clock_project(1, &[0], tempo);
+                    let (mut e, mut rx) = clock_engine(&p, sr, PlayMode::Pattern(p.patterns[0].id));
+                    e.handle_cmd(EngineCmd::Play);
+                    let spt = samples_per_tick(sr as f64, tempo);
+                    // 8 beats: the one-bar pattern loops once.
+                    let beats = 8u64;
+                    let end = tick_to_frame((beats * PPQ as u64) as f64, spt);
+                    let mut r = Run::new();
+                    r.go(&mut e, &mut rx, end as usize, blocks);
+                    let msgs = r.take();
+                    let expected: Vec<u64> = (0..24 * beats).map(|k| tick_to_frame((k * 40) as f64, spt)).collect();
+                    assert_eq!(pulse_frames(&msgs, 0), expected, "sr {sr} tempo {tempo} blocks {blocks:?}");
+                    // Start first, on the frame of the first pulse; nothing else (Pattern mode: no SPP at the wrap).
+                    assert_eq!(msgs[0], (0, 0, FA));
+                    assert_eq!(msgs[1], (0, 0, F8));
+                    assert_eq!(msgs.len() as u64, 1 + 24 * beats);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clock_only_on_enabled_outputs() {
+        let note = Note { start: 0, len: STEP, key: 60, velocity: 100 };
+        let (mut p, ids) = midi_out_project(&[(0, 0), (1, 2)], &[note]);
+        p.midi_outs = vec![None; 3];
+        p.set_midi_clock(1, true);
+        let (mut e, _h, mut rx) = midi_out_engine(&p, &ids);
+        let mut r = Run::new();
+        r.go(&mut e, &mut rx, 24_000, &[512]);
+        let msgs = r.take();
+        let system: Vec<_> = msgs.iter().filter(|m| m.2[0] >= 0xF0).collect();
+        assert_eq!(system.len(), 25);
+        assert!(system.iter().all(|m| m.1 == 1));
+        // At frame 0: transport and clock before the notes.
+        let first: Vec<(u8, [u8; 3])> = msgs.iter().take_while(|m| m.0 == 0).map(|m| (m.1, m.2)).collect();
+        assert_eq!(first, vec![(1, FA), (1, F8), (0, [0x90, 60, 100]), (2, [0x91, 60, 100])]);
+        // Clock off everywhere: notes only.
+        let (p, ids) = midi_out_project(&[(0, 0)], &[note]);
+        let (mut e, _h, mut rx) = midi_out_engine(&p, &ids);
+        let mut r = Run::new();
+        r.go(&mut e, &mut rx, 24_000, &[512]);
+        assert!(r.take().iter().all(|m| m.2[0] < 0xF0));
+    }
+
+    #[test]
+    fn clock_transport_messages() {
+        // 120 BPM at 48 kHz: 25 frames per tick, a pulse every 1000 frames.
+        let p = clock_project(2, &[0], 120.0);
+        let (mut e, mut rx) = clock_engine(&p, 48_000, PlayMode::Pattern(p.patterns[0].id));
+        let mut r = Run::new();
+        // Stopped: nothing.
+        r.go(&mut e, &mut rx, 5_000, &[512]);
+        assert!(r.take().is_empty());
+        e.handle_cmd(EngineCmd::Play);
+        r.go(&mut e, &mut rx, 10_000, &[512]);
+        assert_eq!(&r.take()[..3], &[(5_000, 0, FA), (5_000, 0, F8), (6_000, 0, F8)]);
+        // Pause at tick 400: Stop, then silence.
+        e.handle_cmd(EngineCmd::Pause);
+        r.go(&mut e, &mut rx, 7_000, &[512]);
+        assert_eq!(r.take(), vec![(15_000, 0, FC)]);
+        // Resume at tick 400: SPP for the next sixteenth (tick 480 = 2) right away; the pulses
+        // keep the grid; Continue just before the pulse on tick 480.
+        e.handle_cmd(EngineCmd::Play);
+        r.go(&mut e, &mut rx, 4_000, &[512]);
+        let t = 22_000;
+        assert_eq!(
+            r.take(),
+            vec![(t, 0, [0xF2, 2, 0]), (t, 0, F8), (t + 1000, 0, F8), (t + 2000, 0, FB), (t + 2000, 0, F8), (t + 3000, 0, F8)]
+        );
+        // Seek to tick 1000 while playing:
+        // Stop, SPP 5 (tick 1200), pulses on its grid, Continue at tick 1200.
+        e.handle_cmd(EngineCmd::Seek(1000.0));
+        r.go(&mut e, &mut rx, 6_000, &[512]);
+        let t = 26_000;
+        assert_eq!(
+            r.take(),
+            vec![
+                (t, 0, FC),
+                (t, 0, [0xF2, 5, 0]),
+                (t, 0, F8),
+                (t + 1000, 0, F8),
+                (t + 2000, 0, F8),
+                (t + 3000, 0, F8),
+                (t + 4000, 0, F8),
+                (t + 5000, 0, FB),
+                (t + 5000, 0, F8),
+            ]
+        );
+        // Stop: Stop; Stop again while stopped: nothing.
+        e.handle_cmd(EngineCmd::Stop);
+        e.handle_cmd(EngineCmd::Stop);
+        r.go(&mut e, &mut rx, 1_000, &[512]);
+        assert_eq!(r.take(), vec![(32_000, 0, FC)]);
+        // Play from the region start (tick 0): Start.
+        e.handle_cmd(EngineCmd::Play);
+        r.go(&mut e, &mut rx, 10, &[512]);
+        assert_eq!(r.take(), vec![(33_000, 0, FA), (33_000, 0, F8)]);
+    }
+
+    #[test]
+    fn clock_song_loop_wrap_is_steady_with_spp() {
+        let mut p = clock_project(1, &[0], 120.0);
+        let pat = p.patterns[0].id;
+        p.arrangement.clips.push(Clip { pattern: pat, track: 0, start: 0, len: 4 * p.bar_len() });
+        let (mut e, mut rx) = clock_engine(&p, 48_000, PlayMode::Song);
+        // Loop on steps 4..8 (one beat): Stop returns to the loop start.
+        e.handle_cmd(EngineCmd::SetLoop(Some((4 * STEP, 8 * STEP))));
+        e.handle_cmd(EngineCmd::Stop);
+        e.handle_cmd(EngineCmd::Play);
+        let mut r = Run::new();
+        r.go(&mut e, &mut rx, 24_000 * 3, &[333]);
+        let msgs = r.take();
+        // Not at tick 0: SPP 4 + Continue, on the first pulse.
+        assert_eq!(&msgs[..3], &[(0, 0, [0xF2, 4, 0]), (0, 0, FB), (0, 0, F8)]);
+        // Steady pulses over three loops, no double or missing pulse at the wraps.
+        let pulses = pulse_frames(&msgs, 0);
+        assert_eq!(pulses, (0..72).map(|k| k * 1000).collect::<Vec<_>>());
+        // An SPP to the loop start before the first pulse of each repetition.
+        let spps: Vec<u64> = msgs.iter().filter(|m| m.2[0] == 0xF2).map(|m| m.0).collect();
+        assert_eq!(spps, vec![0, 24_000, 48_000]);
+        let i = msgs.iter().position(|m| m.0 == 24_000).unwrap();
+        assert_eq!(&msgs[i..i + 2], &[(24_000, 0, [0xF2, 4, 0]), (24_000, 0, F8)]);
+    }
+
+    #[test]
+    fn clock_ignores_swing() {
+        let pulses = |swing: f32| {
+            let note = Note { start: STEP, len: STEP, key: 60, velocity: 100 };
+            let (mut p, ids) = midi_out_project(&[(0, 0)], &[note]);
+            p.swing = swing;
+            p.set_midi_clock(0, true);
+            let (mut e, _h, mut rx) = midi_out_engine(&p, &ids);
+            let mut r = Run::new();
+            r.go(&mut e, &mut rx, 48_000, &[256]);
+            let msgs = r.take();
+            let on = msgs.iter().find(|m| m.2[0] == 0x90).unwrap().0;
+            (pulse_frames(&msgs, 0), on)
+        };
+        let (straight, on0) = pulses(0.0);
+        let (swung, on1) = pulses(1.0);
+        assert_eq!(straight, (0..48).map(|k| k * 1000).collect::<Vec<_>>());
+        assert_eq!(swung, straight);
+        // The note itself is swung (half a step later).
+        assert_eq!(on1 - on0, STEP * 25 / 2);
+    }
+
+    #[test]
+    fn clock_follows_tempo_change() {
+        let mut p = clock_project(1, &[0], 120.0);
+        let (mut e, mut rx) = clock_engine(&p, 48_000, PlayMode::Pattern(p.patterns[0].id));
+        e.handle_cmd(EngineCmd::Play);
+        let mut r = Run::new();
+        // Tick 420 at 120 BPM (25 frames per tick).
+        r.go(&mut e, &mut rx, 10_500, &[500]);
+        p.tempo_bpm = 150.0; // 20 frames per tick
+        e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(&p))));
+        r.go(&mut e, &mut rx, 20_000, &[500]);
+        let msgs = r.take();
+        // No transport message on a tempo change.
+        assert_eq!(msgs.iter().filter(|m| m.2 != F8).count(), 1);
+        let pulses = pulse_frames(&msgs, 0);
+        // Pulses 0..10 at the old tempo (ticks 0..400), then ticks 440, 480… at the new one.
+        let mut expected: Vec<u64> = (0..11).map(|k| k * 1000).collect();
+        expected.extend((0..25).map(|k| 10_500 + 400 + k * 800));
+        assert_eq!(pulses, expected);
+    }
+
+    #[test]
+    fn clock_toggled_while_playing() {
+        let mut p = clock_project(2, &[0], 120.0);
+        let (mut e, mut rx) = clock_engine(&p, 48_000, PlayMode::Pattern(p.patterns[0].id));
+        e.handle_cmd(EngineCmd::Play);
+        let mut r = Run::new();
+        r.go(&mut e, &mut rx, 10_000, &[500]);
+        r.take();
+        // Tick 400: OUT 2 joins (SPP 2, Continue at tick 480), OUT 1 stops.
+        p.set_midi_clock(1, true);
+        p.set_midi_clock(0, false);
+        e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(&p))));
+        r.go(&mut e, &mut rx, 3_000, &[500]);
+        assert_eq!(
+            r.take(),
+            vec![
+                (10_000, 0, FC),
+                (10_000, 1, [0xF2, 2, 0]),
+                (10_000, 1, F8),
+                (11_000, 1, F8),
+                (12_000, 1, FB),
+                (12_000, 1, F8),
+            ]
+        );
     }
 
     // ------------------------------------------------------------------

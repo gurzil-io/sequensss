@@ -18,6 +18,9 @@ fn loads_project_saved_by_earlier_version() {
     assert_eq!(p.patterns.len(), 2);
     assert_eq!(p.arrangement.clips.len(), 3);
     assert_eq!(p.midi_outs, vec![Some("IAC Bus 1".to_string()), None]);
+    // MIDI clock did not exist yet: off on every output.
+    assert!(p.midi_clock.is_empty());
+    assert_eq!(p.midi_clock_mask(), 0);
 
     let lead = p.channels.iter().find(|c| c.name == "Lead").unwrap();
     assert!(lead.arp.enabled);

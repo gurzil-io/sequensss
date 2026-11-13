@@ -7,7 +7,7 @@
 //!   midi_sched.rs.
 
 use rtrb::{Consumer, Producer};
-use seq_engine::{MidiInMsg, MidiOutMsg};
+use seq_engine::{MidiInMsg, MidiOutMsg, midi_msg_len};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, Thread};
@@ -266,7 +266,8 @@ impl sched::Output for Ports {
     fn send(&mut self, port: u8, bytes: &[u8; 3]) {
         let Some(Some(name)) = self.outs.get(port as usize) else { return };
         if let Some((_, c)) = self.conns.iter_mut().find(|c| c.0 == *name) {
-            let _ = c.send(bytes);
+            // Real-time messages are 1 byte, SPP 3, notes 3: the padding is not sent.
+            let _ = c.send(&bytes[..midi_msg_len(bytes[0])]);
         }
     }
 }

@@ -45,10 +45,18 @@ pub struct Project {
     /// Project MIDI outputs (OUT 1, OUT 2…): port name, or `None` if not connected.
     #[serde(default = "default_midi_outs")]
     pub midi_outs: Vec<Option<String>>,
+    /// Outputs that send MIDI clock and Start / Stop / Continue, parallel to `midi_outs`
+    /// (missing = off). Not written while all are off: older versions read the file as is.
+    #[serde(default, skip_serializing_if = "no_clock")]
+    pub midi_clock: Vec<bool>,
 }
 
 fn default_midi_outs() -> Vec<Option<String>> {
     vec![None]
+}
+
+fn no_clock(v: &[bool]) -> bool {
+    !v.contains(&true)
 }
 
 /// Maximum number of MIDI outputs per project.
@@ -264,6 +272,7 @@ impl Project {
             arrangement: Arrangement { tracks: 8, clips: Vec::new() },
             next_id: 1,
             midi_outs: default_midi_outs(),
+            midi_clock: Vec::new(),
         };
         let len = p.bar_len();
         p.add_pattern("Pattern 1", len);
@@ -285,6 +294,48 @@ impl Project {
     /// Length of a beat in ticks.
     pub fn beat_len(&self) -> Tick {
         PPQ as Tick * 4 / self.time_sig.1.max(1) as Tick
+    }
+
+    /// Whether MIDI output `out` sends clock.
+    pub fn midi_clock(&self, out: usize) -> bool {
+        self.midi_clock.get(out).copied().unwrap_or(false)
+    }
+
+    pub fn set_midi_clock(&mut self, out: usize, on: bool) {
+        if self.midi_clock.len() <= out {
+            self.midi_clock.resize(out + 1, false);
+        }
+        self.midi_clock[out] = on;
+        while self.midi_clock.last() == Some(&false) {
+            self.midi_clock.pop();
+        }
+    }
+
+    /// Outputs sending clock, as a bit mask (bit i = output i).
+    pub fn midi_clock_mask(&self) -> u8 {
+        (0..self.midi_outs.len().min(MAX_MIDI_OUTS)).filter(|&i| self.midi_clock(i)).fold(0, |m, i| m | 1 << i)
+    }
+
+    /// Removes MIDI output `i`: channels that targeted it move to OUT 1, those on the
+    /// following outputs are shifted down.
+    pub fn remove_midi_out(&mut self, i: usize) {
+        if i >= self.midi_outs.len() {
+            return;
+        }
+        self.midi_outs.remove(i);
+        if i < self.midi_clock.len() {
+            self.midi_clock.remove(i);
+        }
+        for c in self.channels.iter_mut().filter(|c| matches!(c.kind, ChannelKind::MidiOut { out, .. } if out as usize >= i)) {
+            if let ChannelKind::MidiOut { out, .. } = &mut c.make_mut().kind {
+                let o = *out as usize;
+                if o == i {
+                    *out = 0;
+                } else if o > i {
+                    *out -= 1;
+                }
+            }
+        }
     }
 
     pub fn channel(&self, id: ChannelId) -> Option<&Channel> {
@@ -400,6 +451,36 @@ mod tests {
         assert!(!old.contains("arp:"));
         let back: Project = ron::from_str(&old).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn midi_clock_setting_round_trip() {
+        let mut p = Project::empty();
+        p.midi_outs = vec![None, Some("A".into()), None];
+        p.set_midi_clock(1, true);
+        assert_eq!(p.midi_clock_mask(), 0b010);
+        let s = ron::ser::to_string_pretty(&p, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(s.contains("midi_clock"));
+        let back: Project = ron::from_str(&s).unwrap();
+        assert_eq!(back, p);
+        assert!(back.midi_clock(1) && !back.midi_clock(0) && !back.midi_clock(2));
+        // All off: the field is not written.
+        p.set_midi_clock(1, false);
+        assert!(p.midi_clock.is_empty());
+        let s = ron::ser::to_string_pretty(&p, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(!s.contains("midi_clock"));
+    }
+
+    #[test]
+    fn removing_midi_out_shifts_clock_and_channels() {
+        let mut p = Project::empty();
+        p.midi_outs = vec![None, None, None];
+        let a = p.add_channel("a", ChannelKind::MidiOut { channel: 0, out: 2 }).unwrap();
+        p.set_midi_clock(2, true);
+        p.remove_midi_out(1);
+        assert_eq!(p.midi_outs.len(), 2);
+        assert_eq!(p.midi_clock_mask(), 0b10);
+        assert!(matches!(p.channel(a).unwrap().kind, ChannelKind::MidiOut { out: 1, .. }));
     }
 
     #[test]

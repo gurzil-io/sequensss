@@ -16,7 +16,7 @@ pub mod synth;
 
 pub use engine::{
     Engine, EngineCmd, EngineEvent, EngineHandle, Garbage, MidiInMsg, MidiOutMsg, PlayMode, Shared,
-    SlotKind,
+    SlotKind, midi_msg_len,
 };
 pub use graph::{Compiler, PlaybackGraph, compile};
 pub use instrument::Instrument;
