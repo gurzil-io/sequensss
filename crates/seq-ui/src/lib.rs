@@ -183,6 +183,7 @@ pub struct SeqUi {
     audition: Option<(ChannelId, u8)>,
     piano: PianoState,
     playlist: PlaylistState,
+    rack: rack::RackState,
     /// Open project browser (filled by the app; Android).
     pub browser: Option<browser::Browser>,
     /// "Check for updates" setting (mirrored by the app).
@@ -226,6 +227,7 @@ impl SeqUi {
             audition: None,
             piano: PianoState::default(),
             playlist: PlaylistState::default(),
+            rack: rack::RackState::default(),
             browser: None,
             check_updates: true,
             update: None,

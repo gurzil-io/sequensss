@@ -11,6 +11,71 @@ use seq_i18n::{tr, trf};
 use seq_model::*;
 
 const ROW_H: f32 = 44.0;
+/// Step width bounds: a bar fits the width when it can (as with the fixed lengths),
+/// otherwise the steps keep this minimum size and the rack scrolls. Longer patterns
+/// never squeeze the steps.
+const MIN_CW: f32 = 12.0;
+const MAX_CW: f32 = 56.0;
+/// Gaps between steps, groups of 4 steps, bars (added to the group gap).
+const GAP: f32 = 4.0;
+const GGAP: f32 = 6.0;
+const BGAP: f32 = 8.0;
+/// Horizontal scroll bar under the rows.
+const HBAR_H: f32 = 16.0;
+/// Left of the steps: mute, solo, channel tile.
+const STEPS_X: f32 = 265.0;
+/// After a manual scroll, the view stops following the playhead for this long (s).
+const FOLLOW_PAUSE: f64 = 2.0;
+
+/// Horizontal scroll of the step grid.
+#[derive(Default)]
+pub struct RackState {
+    scroll_x: f32,
+    /// Time of the last manual scroll.
+    scrolled_at: f64,
+    /// Pattern before the step paint in progress (restored if it becomes a two-finger gesture).
+    before: Option<CowArc<Pattern>>,
+}
+
+/// Horizontal layout of the step columns, shared by all rows: the pattern's steps,
+/// then empty bars (at least one) where painting a step grows the pattern.
+#[derive(Clone, Copy)]
+struct Cols {
+    /// Step width.
+    cw: f32,
+    /// Steps per bar.
+    spb: usize,
+    /// Steps of the pattern.
+    steps: usize,
+    /// Columns drawn (pattern + empty bars).
+    total: usize,
+    /// Visible width and scroll.
+    view: f32,
+    sx: f32,
+}
+
+impl Cols {
+    fn new(view: f32, spb: usize, steps: usize) -> Self {
+        let groups = spb.div_ceil(4);
+        let cw = ((view - (spb - 1) as f32 * GAP - (groups - 1) as f32 * GGAP) / spb as f32).clamp(MIN_CW, MAX_CW);
+        let bars = steps.div_ceil(spb) + 1;
+        let fill = ((view / (cw + GAP)) as usize).div_ceil(spb);
+        Cols { cw, spb, steps, total: bars.max(fill) * spb, view, sx: 0.0 }
+    }
+
+    /// Left of column `i`, from the start of the grid (unscrolled).
+    fn offset(&self, i: usize) -> f32 {
+        i as f32 * (self.cw + GAP) + (i / 4) as f32 * GGAP + (i / self.spb) as f32 * BGAP
+    }
+
+    fn content(&self) -> f32 {
+        self.offset(self.total - 1) + self.cw
+    }
+
+    fn max_scroll(&self) -> f32 {
+        (self.content() - self.view).max(0.0)
+    }
+}
 
 enum RowOp {
     Delete(ChannelId),
@@ -58,14 +123,36 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 st.status = tr!("Impossible de supprimer le dernier pattern", "Can't delete the last pattern").into();
             }
         });
-        // Length in bars.
-        let len = project.pattern(pat_id).map(|p| p.length).unwrap_or(bar);
-        let mut sel = if len % bar == 0 { len / bar } else { 0 };
-        if skin::segmented(ui, &mut sel, &[(1, None, tr!("1 mes.", "1 bar")), (2, None, tr!("2 mes.", "2 bars")), (4, None, tr!("4 mes.", "4 bars"))], 38.0, 0.0, skin::SegStyle::Grey, body(14.0)) {
-            seq_edit::set_pattern_length(project, pat_id, sel * bar);
-        }
-        if sel == 0 || sel == 3 || sel > 4 {
-            ui.label(egui::RichText::new(trf!("{} pas", "{} steps", len.div_ceil(STEP))).font(medium(14.0)).color(TEXT_DIM));
+        // Length: − / + one bar. Painting past the end also grows the pattern.
+        if let Some(pat) = project.pattern(pat_id) {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let (len, shorter, longer) = (pat.length, seq_edit::shorter_length(pat, bar), seq_edit::longer_length(pat, bar));
+            let tip = tr!("Retirer la dernière mesure (si elle est vide)", "Remove the last bar (if it is empty)");
+            let minus = ui
+                .add_enabled_ui(shorter.is_some(), |ui| skin::text_button(ui, vec2(32.0, 38.0), Kind::Dark, "−", body(20.0)))
+                .inner
+                .on_hover_text(tip)
+                .on_disabled_hover_text(tip);
+            if minus.clicked()
+                && let Some(l) = shorter
+            {
+                seq_edit::set_pattern_length(project, pat_id, l);
+            }
+            let label = match len / bar {
+                1 if len == bar => tr!("1 mes.", "1 bar").to_string(),
+                n if len % bar == 0 => trf!("{} mes.", "{} bars", n),
+                _ => trf!("{} pas", "{} steps", len.div_ceil(STEP)),
+            };
+            let font = body(14.0);
+            let w = ui.fonts(|f| f.layout_no_wrap(label.clone(), font.clone(), TEXT).size().x).max(40.0) + 4.0;
+            let (r, _) = ui.allocate_exact_size(vec2(w, 38.0), Sense::hover());
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, label, font, TEXT);
+            if skin::text_button(ui, vec2(32.0, 38.0), Kind::Dark, "+", body(20.0))
+                .on_hover_text(tr!("Ajouter une mesure (ou peindre après la fin du pattern)", "Add a bar (or paint past the end of the pattern)"))
+                .clicked()
+            {
+                seq_edit::set_pattern_length(project, pat_id, longer);
+            }
         }
         if ui.available_width() > 140.0 {
             skin::spacer_right(ui, 130.0);
@@ -81,15 +168,51 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     }
 
     let inner = res.body.shrink2(vec2(12.0, 10.0));
-    let mut bu = ui.new_child(UiBuilder::new().max_rect(inner));
-    bu.set_clip_rect(inner);
+    let rows = Rect::from_min_max(inner.min, pos2(inner.right(), inner.bottom() - HBAR_H - 6.0));
+    let hbar = Rect::from_min_max(pos2(inner.left(), rows.bottom() + 6.0), inner.max);
+    let mut bu = ui.new_child(UiBuilder::new().max_rect(rows));
+    bu.set_clip_rect(rows);
     let pointer = Pointer::read(&bu);
+    let now = ui.input(|i| i.time);
     let playing_step = (info.playing && !st.song_mode).then(|| (info.playhead / STEP as f64) as usize);
+    let spb = (bar / STEP).max(1) as usize;
     let mut op = None;
+    let mut cols = None;
+
+    // Two fingers: the step paint started by the first finger is cancelled.
+    if pointer.multi
+        && st.step_paint.take().is_some()
+        && let Some(before) = st.rack.before.take()
+        && let Some(p) = project.patterns.iter_mut().find(|p| p.id == before.id)
+    {
+        *p = before;
+    }
+    if !pointer.any_down() {
+        st.rack.before = None;
+    }
+    // Horizontal scroll: wheel (Shift+wheel, trackpad) or two fingers.
+    if pointer.pos.is_some_and(|p| inner.contains(p)) && pointer.scroll.x != 0.0 {
+        st.rack.scroll_x -= pointer.scroll.x;
+        st.rack.scrolled_at = now;
+    }
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut bu, |ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
         let width = ui.available_width();
+        let steps = project.pattern(pat_id).map(step_count).unwrap_or(0);
+        let mut c = Cols::new(width - STEPS_X, spb, steps);
+        // Follows the playhead page by page, unless the user just scrolled or is painting.
+        let rs = &mut st.rack;
+        if let Some(s) = playing_step.filter(|_| steps > 0).map(|s| s % steps)
+            && now - rs.scrolled_at > FOLLOW_PAUSE
+            && st.step_paint.is_none()
+            && (c.offset(s) < rs.scroll_x || c.offset(s) + c.cw > rs.scroll_x + c.view)
+        {
+            rs.scroll_x = c.offset(s / spb * spb);
+        }
+        rs.scroll_x = rs.scroll_x.clamp(0.0, c.max_scroll());
+        c.sx = rs.scroll_x;
+        cols = Some(c);
         for i in 0..project.channels.len() {
             let ch = project.channels[i].clone();
             let (row, _) = ui.allocate_exact_size(vec2(width, ROW_H), Sense::hover());
@@ -195,8 +318,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             });
 
             // Steps
-            let steps = Rect::from_min_max(pos2(tile.right() + 11.0, row.top()), row.max);
-            steps_row(st, ui, &p, steps, project, pat_id, ch.id, color, playing_step, &pointer);
+            let steps = Rect::from_min_max(pos2(row.left() + STEPS_X, row.top()), row.max);
+            steps_row(st, ui, &p, steps, project, pat_id, ch.id, color, playing_step, &pointer, &c);
         }
 
         ui.add_space(4.0);
@@ -213,6 +336,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             st.add_channel_items(ui, project);
         });
     });
+    if let Some(c) = cols {
+        hscroll(st, ui, hbar, &c, &pointer, now);
+    }
 
     match op {
         Some(RowOp::Delete(id)) => seq_edit::remove_channel(project, id),
@@ -278,39 +404,54 @@ fn steps_row(
     color: Color32,
     playing_step: Option<usize>,
     pointer: &Pointer,
+    c: &Cols,
 ) {
     let Some(pat) = project.pattern(pat_id) else { return };
-    let n = step_count(pat).max(1);
-    let groups = n.div_ceil(4);
-    let gap = 4.0;
-    let ggap = 6.0;
-    let cw = ((area.width() - (n - 1) as f32 * gap - (groups - 1) as f32 * ggap) / n as f32).max(4.0);
-    let cell = |i: usize| -> Rect {
-        let x = area.left() + i as f32 * (cw + gap) + (i / 4) as f32 * ggap;
-        Rect::from_min_size(pos2(x, area.top()), vec2(cw, area.height()))
+    let cell = |i: usize| Rect::from_min_size(pos2(area.left() + c.offset(i) - c.sx, area.top()), vec2(c.cw, area.height()));
+    let cell_at = |x: f32| {
+        (area.x_range().contains(x)).then(|| (0..c.total).find(|&i| cell(i).expand2(vec2(GAP / 2.0 + 1.0, 0.0)).x_range().contains(x))).flatten()
     };
-    let cell_at = |x: f32| (0..n).find(|&i| cell(i).expand2(vec2(gap / 2.0 + 1.0, 0.0)).x_range().contains(x));
     let resp = ui.interact(area, ui.id().with(("steps", ch.0)), Sense::click_and_drag());
+    // The glow may overflow vertically, not onto the channel tile.
+    let p = p.with_clip_rect(Rect::from_min_max(pos2(area.left() - 3.0, area.top() - 4.0), pos2(area.right(), area.bottom() + 4.0)).intersect(p.clip_rect()));
 
-    let r = (cw * 0.15).clamp(2.0, 6.0);
-    for i in 0..n {
-        let c = cell(i);
+    let r = (c.cw * 0.15).clamp(2.0, 6.0);
+    let playing = playing_step.filter(|_| c.steps > 0).map(|s| s % c.steps);
+    for i in 0..c.total {
+        let cr = cell(i);
+        if cr.right() < area.left() - 3.0 {
+            continue;
+        }
+        if cr.left() > area.right() {
+            break;
+        }
         let off_bg = if (i / 4) % 2 == 1 { STEP_OFF_B } else { STEP_OFF_A };
         match step_vel(pat, ch, i) {
             Some(v) => {
                 let fill = if v >= 100 { color } else { mix(off_bg, color, 0.72) };
-                skin::glow(p, c, r, with_alpha(color, 90), 3.0);
-                p.rect_filled(c, r, fill);
-                p.rect_filled(Rect::from_min_max(pos2(c.left(), c.bottom() - 4.0), c.max), r, Color32::from_black_alpha(56));
-                p.line_segment([pos2(c.left() + r, c.top() + 1.0), pos2(c.right() - r, c.top() + 1.0)], Stroke::new(1.0_f32, Color32::from_white_alpha(90)));
+                skin::glow(&p, cr, r, with_alpha(color, 90), 3.0);
+                p.rect_filled(cr, r, fill);
+                p.rect_filled(Rect::from_min_max(pos2(cr.left(), cr.bottom() - 4.0), cr.max), r, Color32::from_black_alpha(56));
+                p.line_segment([pos2(cr.left() + r, cr.top() + 1.0), pos2(cr.right() - r, cr.top() + 1.0)], Stroke::new(1.0_f32, Color32::from_white_alpha(90)));
+            }
+            // Past the end of the pattern: painting a step there grows the pattern.
+            None if i >= c.steps => {
+                p.rect_filled(cr, r, with_alpha(off_bg, 45));
             }
             None => {
-                p.rect_filled(c, r, off_bg);
-                p.line_segment([pos2(c.left() + r, c.top() + 1.5), pos2(c.right() - r, c.top() + 1.5)], Stroke::new(2.0_f32, Color32::from_black_alpha(60)));
+                p.rect_filled(cr, r, off_bg);
+                p.line_segment([pos2(cr.left() + r, cr.top() + 1.5), pos2(cr.right() - r, cr.top() + 1.5)], Stroke::new(2.0_f32, Color32::from_black_alpha(60)));
             }
         }
-        if playing_step.is_some_and(|s| s % n == i) {
-            p.rect_stroke(c.shrink(1.0), r, Stroke::new(2.0_f32, Color32::WHITE));
+        if playing == Some(i) {
+            p.rect_stroke(cr.shrink(1.0), r, Stroke::new(2.0_f32, Color32::WHITE));
+        }
+    }
+    // End of the pattern.
+    if c.steps > 0 {
+        let x = (cell(c.steps - 1).right() + cell(c.steps).left()) / 2.0;
+        if area.x_range().contains(x) {
+            crate::widgets::vline(&p, x, area.top() - 2.0, area.bottom() + 2.0, with_alpha(ORANGE, 170), 2.0);
         }
     }
 
@@ -319,6 +460,7 @@ fn steps_row(
         && let Some(i) = pointer.pos.and_then(|q| cell_at(q.x))
     {
         let target = pointer.primary_pressed && step_vel(pat, ch, i).is_none();
+        st.rack.before = project.patterns.iter().find(|p| p.id == pat_id).cloned();
         st.step_paint = Some((ch, target));
         st.channel = Some(ch);
     }
@@ -330,4 +472,45 @@ fn steps_row(
     {
         seq_edit::set_step(project, pat_id, ch, i, val);
     }
+}
+
+/// Horizontal scroll bar under the rows: overview of the pattern (bars, end) and of the
+/// visible part. Tap = jump there, drag = scroll. On the left: the bars in sight.
+fn hscroll(st: &mut SeqUi, ui: &mut Ui, rect: Rect, c: &Cols, pointer: &Pointer, now: f64) {
+    let track = Rect::from_min_max(pos2(rect.left() + STEPS_X, rect.top()), pos2(rect.left() + STEPS_X + c.view, rect.bottom()));
+    let first = (c.sx / (c.offset(c.spb).max(1.0))) as usize + 1;
+    let last = ((c.sx + c.view) / c.offset(c.spb).max(1.0)).ceil().max(1.0) as usize;
+    let p = ui.painter();
+    let label = if first >= last { trf!("MES. {}", "BAR {}", first) } else { trf!("MES. {}–{}", "BARS {}–{}", first, last) };
+    skin::caption(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, &label, TEXT_DIMMER);
+
+    let k = track.width() / c.content().max(1.0);
+    let x_of = |off: f32| track.left() + off * k;
+    p.rect_filled(track, 5.0, INNER);
+    if c.steps > 0 {
+        let end = x_of(c.offset(c.steps - 1) + c.cw);
+        p.rect_filled(Rect::from_min_max(track.min, pos2(end, track.bottom())), 5.0, with_alpha(ORANGE, 45));
+    }
+    for b in 1..c.total.div_ceil(c.spb) {
+        let x = x_of(c.offset(b * c.spb)) - BGAP * k / 2.0;
+        crate::widgets::vline(p, x, track.top() + 3.0, track.bottom() - 3.0, Color32::from_white_alpha(28), 1.0);
+    }
+    let thumb = Rect::from_min_max(pos2(x_of(c.sx), track.top()), pos2(x_of(c.sx + c.view).min(track.right()), track.bottom()));
+    p.rect_filled(thumb, 5.0, Color32::from_white_alpha(40));
+    p.rect_stroke(thumb, 5.0, Stroke::new(1.0_f32, Color32::from_white_alpha(110)));
+
+    let resp = ui.interact(track.expand2(vec2(0.0, 4.0)), ui.id().with("rack_hscroll"), Sense::click_and_drag());
+    let rs = &mut st.rack;
+    if resp.hovered()
+        && pointer.primary_pressed
+        && let Some(pos) = pointer.pos.filter(|p| !thumb.x_range().contains(p.x))
+    {
+        rs.scroll_x = (pos.x - track.left()) / k - c.view / 2.0;
+        rs.scrolled_at = now;
+    }
+    if resp.dragged() {
+        rs.scroll_x += resp.drag_delta().x / k;
+        rs.scrolled_at = now;
+    }
+    rs.scroll_x = rs.scroll_x.clamp(0.0, c.max_scroll());
 }

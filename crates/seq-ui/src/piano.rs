@@ -65,6 +65,9 @@ pub struct PianoState {
     seen: Option<(PatternId, ChannelId, Vec<Note>)>,
     clipboard: Vec<Note>,
     centered_for: Option<ChannelId>,
+    /// Pattern length when the current gesture began: notes placed past the end grow the
+    /// pattern, and dragging them back shrinks it again, never below this length.
+    grow_base: Option<(PatternId, Tick)>,
 }
 
 impl Default for PianoState {
@@ -82,6 +85,7 @@ impl Default for PianoState {
             seen: None,
             clipboard: Vec::new(),
             centered_for: None,
+            grow_base: None,
         }
     }
 }
@@ -182,6 +186,12 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     }
     let edit = st.take_edit(Editor::Piano);
     let ps = &mut st.piano;
+    let base_len = match ps.grow_base {
+        Some((p, len)) if p == pat_id => len,
+        _ => pat_len,
+    };
+    // Room after the end of the pattern: one bar, where notes can be placed (the pattern grows).
+    let reach = (base_len + bar).max(pat_len);
 
     // --- Scroll / zoom ---
     if ps.centered_for != Some(ch) {
@@ -204,11 +214,15 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         ps.scroll_x -= dx;
         ps.scroll_y -= dy;
     }
-    // Limited zoom-out: the pattern fills at least the width.
-    let fit = grid.width() / pat_len.max(1) as f32;
+    // Limited zoom-out: the pattern and the bar after it (at least 4 bars) fill the width.
+    let fit = grid.width() / reach.max(4 * bar) as f32;
     ps.zoom = ps.zoom.max(fit);
     ps.scroll_y = ps.scroll_y.clamp(0.0, (128.0 * ps.key_h - grid.height()).max(0.0));
-    ps.scroll_x = ps.scroll_x.clamp(0.0, (pat_len as f32 * ps.zoom - grid.width()).max(0.0));
+    ps.scroll_x = ps.scroll_x.clamp(0.0, (reach as f32 * ps.zoom - grid.width()).max(0.0));
+    // Notes can be placed anywhere in sight, and at least one bar past the end.
+    let limit = reach.max((((ps.scroll_x + grid.width()) / ps.zoom) as Tick).div_ceil(bar) * bar);
+    // Paste / duplicate: as far as needed.
+    let far = limit.max(1024 * bar);
 
     let (zoom, sx, sy, kh) = (ps.zoom, ps.scroll_x, ps.scroll_y, ps.key_h);
     let x_of = |t: f64| grid.left() + t as f32 * zoom - sx;
@@ -262,11 +276,11 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 Some((_, end)) => end.div_ceil(snap) * snap,
                 None => pointer.pos.filter(|p| grid.contains(*p)).map(|p| snap_floor(tick_of(p.x) as Tick, snap)).unwrap_or(0),
             };
-            let added = seq_edit::paste_notes(&mut notes, &ps.clipboard, at, pat_len);
+            let added = seq_edit::paste_notes(&mut notes, &ps.clipboard, at, far);
             set_selection(&mut ps.selected, added);
         }
         Some(EditCmd::Duplicate) if !ps.selected.is_empty() => {
-            let added = seq_edit::duplicate_notes(&mut notes, &ps.selected, snap, pat_len);
+            let added = seq_edit::duplicate_notes(&mut notes, &ps.selected, snap, far);
             set_selection(&mut ps.selected, added);
         }
         Some(EditCmd::Delete) if !ps.selected.is_empty() => {
@@ -275,7 +289,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         }
         Some(EditCmd::Arrow { dx, dy, big }) if !ps.selected.is_empty() => {
             let dk = -dy * if big { 12 } else { 1 };
-            seq_edit::shift_notes(&mut notes, &ps.selected, dx as i64 * snap as i64, dk, pat_len);
+            seq_edit::shift_notes(&mut notes, &ps.selected, dx as i64 * snap as i64, dk, limit);
         }
         _ => {}
     }
@@ -329,8 +343,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                                 Note { start, len: ps.last_len.max(1), key: key_of(pos.y), velocity: 100 }
                             }
                         };
-                        if h.is_none() && brush.start < pat_len {
-                            seq_edit::paint_notes(&mut notes, brush, brush.key, 0, 0, pat_len);
+                        if h.is_none() && brush.start < limit {
+                            seq_edit::paint_notes(&mut notes, brush, brush.key, 0, 0, limit);
                         }
                         actions.push(UiAction::Preview { channel: ch, key: brush.key, vel: brush.velocity, on: true });
                         ps.drag = Some(Drag::Paint { brush, last: 0, before });
@@ -365,10 +379,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                     }
                     (_, None) => {
                         ps.selected.clear();
-                        if (t as Tick) < pat_len {
+                        if (t as Tick) < limit {
                             let key = key_of(pos.y);
                             let start = snap_floor(t as Tick, snap);
-                            let len = ps.last_len.min(pat_len - start).max(1);
+                            let len = ps.last_len.min(limit - start).max(1);
                             notes.push(Note { start, len, key, velocity: 100 });
                             let idx = notes.len() - 1;
                             ps.selected = vec![idx];
@@ -394,7 +408,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                     if slot != last {
                         // Every cell crossed since the last frame (fast drag).
                         let from = if slot > last { last + 1 } else { last - 1 };
-                        seq_edit::paint_notes(&mut notes, brush, key_of(pos.y), from, slot, pat_len);
+                        seq_edit::paint_notes(&mut notes, brush, key_of(pos.y), from, slot, limit);
                         ps.drag = Some(Drag::Paint { brush, last: slot, before });
                     }
                 }
@@ -404,7 +418,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                         let new_start = snap_round(raw, snap) as i64;
                         let new_key = key_of(pos.y) as i32;
                         let base: Vec<Note> = orig.iter().map(|(_, n)| *n).collect();
-                        let (dt, dk) = seq_edit::clamp_shift(&base, new_start - a.start as i64, new_key - a.key as i32, pat_len);
+                        let (dt, dk) = seq_edit::clamp_shift(&base, new_start - a.start as i64, new_key - a.key as i32, limit);
                         for &(i, n) in &orig {
                             if let Some(m) = notes.get_mut(i) {
                                 m.start = (n.start as i64 + dt) as Tick;
@@ -422,7 +436,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 Drag::Resize { anchor, orig } => {
                     if let Some(&(_, a)) = orig.iter().find(|(i, _)| *i == anchor) {
                         let min_len = snap.clamp(1, STEP / 4);
-                        let end = snap_round(tick_of(pos.x) as Tick, snap).max(a.start + min_len);
+                        let end = snap_round(tick_of(pos.x) as Tick, snap).min(limit).max(a.start + min_len);
                         let delta = (end - a.start) as i64 - a.len as i64;
                         for &(i, n) in &orig {
                             if let Some(m) = notes.get_mut(i) {
@@ -497,7 +511,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         actions.push(UiAction::Preview { channel: ch, key, vel: 0, on: false });
     }
 
-    if notes != notes_snapshot
+    // Notes past the end grow the pattern to the end of their bar (same undo step).
+    let new_len = seq_edit::length_for_notes(base_len, &notes, bar);
+    let regrow = ps.grow_base.is_some() && new_len != pat_len;
+    if (notes != notes_snapshot || regrow)
         && let Some(p) = project.pattern_mut(pat_id)
     {
         if notes.is_empty() {
@@ -505,7 +522,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         } else {
             p.notes.insert(ch, notes.clone());
         }
+        p.length = new_len;
     }
+    let pat_len = new_len;
+    ps.grow_base = ps.drag.is_some().then_some((pat_id, base_len));
     if baked {
         if let Some(c) = project.channel_mut(ch) {
             c.arp.enabled = false;
@@ -548,9 +568,11 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         }
         t += line_unit.max(1);
     }
+    // Past the end of the pattern: dimmed, notes can still be placed there.
     let end_x = x_of(pat_len as f64);
     if end_x < grid.right() {
-        gp.rect_filled(Rect::from_min_max(pos2(end_x.max(grid.left()), grid.top()), grid.right_bottom()), 0.0, Color32::from_black_alpha(140));
+        gp.rect_filled(Rect::from_min_max(pos2(end_x.max(grid.left()), grid.top()), grid.right_bottom()), 0.0, Color32::from_black_alpha(110));
+        vline(&gp, end_x, grid.top(), grid.bottom(), with_alpha(ORANGE, 160), 2.0);
     }
     for (i, n) in notes.iter().enumerate() {
         let r = note_rect(n);
