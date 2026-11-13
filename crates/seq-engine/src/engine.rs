@@ -570,8 +570,11 @@ impl Engine {
                 .and_then(|g| g.channels.iter().find(|c| c.id == id).copied())
                 .unwrap_or(ChannelParams::silent(id));
             let old = self.slots[si].params;
-            if old.arp.enabled != new.arp.enabled {
-                // Arpeggiator toggle: silence everything using the old routing.
+            // MIDI routing changed without a new slot (MIDI out replaced by a sample still
+            // loading): the notes would hang on the old channel/output.
+            let rerouted = matches!(self.slots[si].kind, SlotKind::Midi) && (old.midi_channel, old.midi_port) != (new.midi_channel, new.midi_port);
+            if rerouted || old.arp.enabled != new.arp.enabled {
+                // Arpeggiator toggle or rerouting: silence everything using the old routing.
                 self.kill_slot_notes(si);
                 self.flush_arp(si);
             } else if old.arp != new.arp {
@@ -1881,6 +1884,55 @@ mod tests {
         callback(&mut e, 512, 0.0);
         let msgs: Vec<(u8, [u8; 3])> = drain(&mut rx).iter().map(|m| (m.0, m.1)).collect();
         assert_eq!(msgs, vec![(0, [0x90, 60, 100]), (0, [0x80, 60, 0])]);
+    }
+
+    #[test]
+    fn midi_out_replaced_by_loading_sample_releases_notes() {
+        // MIDI out → WAV file not decoded yet: the app swaps the graph and keeps the MIDI slot
+        // until the sample is loaded.
+        let note = Note { start: 0, len: 8 * STEP, key: 60, velocity: 100 };
+        let (mut p, ids) = midi_out_project(&[(2, 1)], &[note]);
+        let (mut e, mut h, mut rx) = midi_out_engine(&p, &ids);
+        callback(&mut e, 1000, 0.0);
+        p.channel_mut(ids[0]).unwrap().kind = ChannelKind::Sampler { source: SampleSource::File("x.wav".into()) };
+        h.send(EngineCmd::SwapGraph(Box::new(compile(&p))));
+        callback(&mut e, 48_000, 0.0);
+        let msgs: Vec<(u8, [u8; 3])> = drain(&mut rx).iter().map(|m| (m.0, m.1)).collect();
+        assert_eq!(msgs, vec![(1, [0x92, 60, 100]), (1, [0x82, 60, 0])]);
+    }
+
+    #[test]
+    fn instrument_replaced_while_playing() {
+        // Synth → MIDI out → synth, as the app does it: SetSlot, then SwapGraph.
+        let note = Note { start: 0, len: 8 * STEP, key: 60, velocity: 100 };
+        let (mut p, ids) = midi_out_project(&[(0, 0)], &[note]);
+        let id = ids[0];
+        p.channel_mut(id).unwrap().kind = ChannelKind::Synth(SynthParams::default());
+        let (tx, mut rx) = RingBuffer::new(256);
+        let (mut e, mut h) = Engine::new(48_000, None, Some(tx));
+        let log: Log = Arc::default();
+        e.handle_cmd(EngineCmd::SetSlot(id, SlotKind::Audio(Box::new(Probe { log: log.clone(), t: 0 }))));
+        e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(&p))));
+        e.handle_cmd(EngineCmd::SetMode(PlayMode::Pattern(p.patterns[0].id)));
+        e.handle_cmd(EngineCmd::Play);
+        callback(&mut e, 1000, 0.0);
+        // The synth note is released, the MIDI output only gets the notes that start afterwards.
+        p.channel_mut(id).unwrap().kind = ChannelKind::MidiOut { channel: 3, out: 0 };
+        h.send(EngineCmd::SetSlot(id, SlotKind::Midi));
+        h.send(EngineCmd::SwapGraph(Box::new(compile(&p))));
+        callback(&mut e, 512, 0.0);
+        assert_eq!(*log.lock().unwrap(), vec![(0, true, 60), (1000, false, 60)]);
+        assert!(drain(&mut rx).is_empty());
+        // Next loop: the note plays on MIDI, then back to the synth releases it on its channel.
+        callback(&mut e, 96_000, 0.0);
+        let log2: Log = Arc::default();
+        p.channel_mut(id).unwrap().kind = ChannelKind::Synth(SynthParams::default());
+        h.send(EngineCmd::SetSlot(id, SlotKind::Audio(Box::new(Probe { log: log2.clone(), t: 0 }))));
+        h.send(EngineCmd::SwapGraph(Box::new(compile(&p))));
+        callback(&mut e, 512, 0.0);
+        let msgs: Vec<(u8, [u8; 3])> = drain(&mut rx).iter().map(|m| (m.0, m.1)).collect();
+        assert_eq!(msgs, vec![(0, [0x93, 60, 100]), (0, [0x83, 60, 0])]);
+        assert!(log2.lock().unwrap().is_empty());
     }
 
     // ------------------------------------------------------------------

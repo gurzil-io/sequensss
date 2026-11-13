@@ -176,6 +176,8 @@ pub struct SeqUi {
     arp_open: Option<ChannelId>,
     renaming_pattern: Option<(PatternId, String)>,
     renaming_channel: Option<(ChannelId, String)>,
+    /// Channel menu showing the "Replace with" choices.
+    replacing: Option<ChannelId>,
     step_paint: Option<(ChannelId, bool)>,
     /// "Preview" button held down: (channel, key) in progress.
     audition: Option<(ChannelId, u8)>,
@@ -219,6 +221,7 @@ impl SeqUi {
             arp_open: None,
             renaming_pattern: None,
             renaming_channel: None,
+            replacing: None,
             step_paint: None,
             audition: None,
             piano: PianoState::default(),
@@ -734,25 +737,11 @@ impl SeqUi {
     /// "Add a channel" menu (rack).
     fn add_channel_items(&mut self, ui: &mut egui::Ui, project: &mut Project) {
         skin::menu_caption(ui, tr!("SON DE BATTERIE INTÉGRÉ", "BUILT-IN DRUM SOUND"));
-        egui::Grid::new("drum_grid").num_columns(2).spacing([4.0, 2.0]).show(ui, |ui| {
-            for (i, d) in Drum::ALL.iter().enumerate() {
-                let w = 150.0;
-                let (r, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
-                let p = ui.painter();
-                if resp.hovered() {
-                    p.rect_filled(r, 6.0, hex(0x433a32));
-                }
-                p.text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, d.name(), body(14.5), TEXT);
-                if resp.clicked() {
-                    let id = project.add_channel(d.name(), ChannelKind::Sampler { source: SampleSource::Builtin(*d) });
-                    self.after_add(id);
-                    ui.memory_mut(|m| m.close_popup());
-                }
-                if i % 2 == 1 {
-                    ui.end_row();
-                }
-            }
-        });
+        if let Some(d) = drum_grid(ui, None) {
+            let id = project.add_channel(d.name(), ChannelKind::Sampler { source: SampleSource::Builtin(d) });
+            self.after_add(id);
+            ui.memory_mut(|m| m.close_popup());
+        }
         skin::menu_separator(ui);
         if skin::menu_item(ui, tr!("Sampler (fichier WAV)…", "Sampler (WAV file)…"), TEXT, false).clicked() {
             self.act(UiAction::LoadSample(None));
@@ -776,6 +765,31 @@ impl SeqUi {
             None => self.status = format!("Maximum {MAX_CHANNELS} channels"),
         }
     }
+}
+
+/// Built-in drum sounds, two per row (`current` highlighted). Returns the one clicked.
+fn drum_grid(ui: &mut egui::Ui, current: Option<Drum>) -> Option<Drum> {
+    let mut picked = None;
+    egui::Grid::new("drum_grid").num_columns(2).spacing([4.0, 2.0]).show(ui, |ui| {
+        for (i, d) in Drum::ALL.into_iter().enumerate() {
+            let (r, resp) = ui.allocate_exact_size(vec2(150.0, 34.0), Sense::click());
+            let p = ui.painter();
+            if current == Some(d) {
+                p.rect_filled(r, 6.0, TILE_SEL);
+                p.rect_filled(Rect::from_min_size(r.left_top() + vec2(0.0, 7.0), vec2(3.0, r.height() - 14.0)), 1.5, ORANGE);
+            } else if resp.hovered() {
+                p.rect_filled(r, 6.0, hex(0x433a32));
+            }
+            p.text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, d.name(), body(14.5), TEXT);
+            if resp.clicked() {
+                picked = Some(d);
+            }
+            if i % 2 == 1 {
+                ui.end_row();
+            }
+        }
+    });
+    picked
 }
 
 /// Engraved vertical separator.

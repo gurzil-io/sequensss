@@ -219,6 +219,37 @@ pub fn duplicate_channel(project: &mut Project, channel: ChannelId) -> Option<Ch
     Some(id)
 }
 
+/// Replaces a channel's instrument. Its notes (in every pattern), mixer settings, choke
+/// group and arpeggiator are kept. The name follows the instrument unless the user chose
+/// it; the step key too, unless it was changed (a sample always starts at its original
+/// pitch). The synth / MIDI out settings being left are remembered for [`Channel::recall`].
+/// Returns `false` if the channel does not exist or already has this instrument.
+pub fn replace_kind(project: &mut Project, channel: ChannelId, mut kind: ChannelKind) -> bool {
+    if let ChannelKind::MidiOut { out, .. } = &mut kind
+        && *out as usize >= project.midi_outs.len()
+    {
+        // Remembered output removed since.
+        *out = 0;
+    }
+    if project.channel(channel).is_none_or(|c| c.kind == kind) {
+        return false;
+    }
+    let ch = project.channel_mut(channel).unwrap();
+    let old = std::mem::replace(&mut ch.kind, kind.clone());
+    if old.is_default_name(&ch.name) {
+        ch.name = kind.default_name();
+    }
+    let to_sample = matches!(kind, ChannelKind::Sampler { .. }) && !matches!(old, ChannelKind::Sampler { .. });
+    if to_sample || ch.default_key == old.default_key() {
+        ch.default_key = kind.default_key();
+    }
+    ch.previous_kinds.retain(|k| !k.same_kind(&old) && !k.same_kind(&kind));
+    if !matches!(old, ChannelKind::Sampler { .. }) {
+        ch.previous_kinds.push(old);
+    }
+    true
+}
+
 pub fn move_channel(project: &mut Project, channel: ChannelId, up: bool) {
     let Some(i) = project.channels.iter().position(|c| c.id == channel) else { return };
     let j = if up { i.checked_sub(1) } else { (i + 1 < project.channels.len()).then_some(i + 1) };
@@ -736,6 +767,98 @@ mod tests {
         remove_channel(&mut p, ch);
         assert!(p.channels.is_empty());
         assert!(p.pattern(pat).unwrap().notes.is_empty());
+    }
+
+    #[test]
+    fn replace_kind_keeps_notes_and_settings() {
+        let (mut p, pat, ch) = setup();
+        let pat2 = new_pattern(&mut p);
+        set_step(&mut p, pat, ch, 0, true);
+        set_step(&mut p, pat2, ch, 3, true);
+        let c = p.channel_mut(ch).unwrap();
+        (c.volume, c.pan, c.mute, c.solo, c.choke) = (0.3, -0.5, true, true, 2);
+        c.arp.enabled = true;
+        let before = p.clone();
+        let mut h = History::new(&p, 100);
+
+        let synth = ChannelKind::Synth(SynthParams::default());
+        assert!(replace_kind(&mut p, ch, synth.clone()));
+        assert!(!replace_kind(&mut p, ch, synth.clone()));
+        assert!(h.commit_if_changed(&p, false));
+        let c = p.channel(ch).unwrap();
+        assert_eq!(c.kind, synth);
+        assert_eq!((c.volume, c.pan, c.mute, c.solo, c.choke, c.arp), (0.3, -0.5, true, true, 2, before.channels[0].arp));
+        for id in [pat, pat2] {
+            assert_eq!(p.pattern(id).unwrap().notes, before.pattern(id).unwrap().notes);
+        }
+        assert!(h.undo(&mut p));
+        assert_eq!(p, before);
+    }
+
+    #[test]
+    fn replace_kind_renames_only_default_names() {
+        let (mut p, _, ch) = setup();
+        p.channel_mut(ch).unwrap().name = "Kick".into();
+        replace_kind(&mut p, ch, ChannelKind::Synth(SynthParams::default()));
+        assert_eq!(p.channel(ch).unwrap().name, "Synth");
+        replace_kind(&mut p, ch, ChannelKind::MidiOut { channel: 0, out: 0 });
+        assert_eq!(p.channel(ch).unwrap().name, "MIDI out");
+        replace_kind(&mut p, ch, ChannelKind::Sampler { source: SampleSource::File("loops/break.wav".into()) });
+        assert_eq!(p.channel(ch).unwrap().name, "break");
+        // Drum → drum (names that are the same in every language: the language is global).
+        p.channel_mut(ch).unwrap().name = "Clap".into();
+        p.channel_mut(ch).unwrap().kind = ChannelKind::Sampler { source: SampleSource::Builtin(Drum::Clap) };
+        replace_kind(&mut p, ch, ChannelKind::Sampler { source: SampleSource::Builtin(Drum::Rim) });
+        assert_eq!(p.channel(ch).unwrap().name, "Rim");
+        // Name chosen by the user: kept.
+        p.channel_mut(ch).unwrap().name = "Lead".into();
+        replace_kind(&mut p, ch, ChannelKind::Synth(SynthParams::default()));
+        assert_eq!(p.channel(ch).unwrap().name, "Lead");
+    }
+
+    #[test]
+    fn replace_kind_default_key() {
+        let (mut p, _, ch) = setup();
+        let synth = ChannelKind::Synth(SynthParams::default());
+        let midi = ChannelKind::MidiOut { channel: 0, out: 0 };
+        let drum = ChannelKind::Sampler { source: SampleSource::Builtin(Drum::Snare) };
+        let key = |p: &Project| p.channel(ch).unwrap().default_key;
+        // Default keys follow the instrument.
+        replace_kind(&mut p, ch, synth.clone());
+        assert_eq!(key(&p), 48);
+        replace_kind(&mut p, ch, midi.clone());
+        assert_eq!(key(&p), 60);
+        // A key chosen by the user is kept…
+        p.channel_mut(ch).unwrap().default_key = 36;
+        replace_kind(&mut p, ch, synth);
+        assert_eq!(key(&p), 36);
+        // …except for a sample, which plays at its original pitch.
+        replace_kind(&mut p, ch, drum);
+        assert_eq!(key(&p), 60);
+    }
+
+    #[test]
+    fn replace_kind_remembers_synth_and_midi_settings() {
+        let (mut p, _, ch) = setup();
+        p.midi_outs.push(None);
+        let sp = SynthParams { cutoff: 1234.0, ..Default::default() };
+        replace_kind(&mut p, ch, ChannelKind::Synth(sp));
+        replace_kind(&mut p, ch, ChannelKind::MidiOut { channel: 9, out: 1 });
+        let c = p.channel(ch).unwrap();
+        assert_eq!(c.recall(ChannelKind::Synth(SynthParams::default())), ChannelKind::Synth(sp));
+        // Not a MIDI out before: defaults.
+        assert_eq!(c.recall(ChannelKind::MidiOut { channel: 0, out: 0 }), ChannelKind::MidiOut { channel: 0, out: 0 });
+        replace_kind(&mut p, ch, ChannelKind::Sampler { source: SampleSource::Builtin(Drum::Clap) });
+        let c = p.channel(ch).unwrap();
+        assert_eq!(c.recall(ChannelKind::MidiOut { channel: 0, out: 0 }), ChannelKind::MidiOut { channel: 9, out: 1 });
+        assert_eq!(c.recall(ChannelKind::Synth(SynthParams::default())), ChannelKind::Synth(sp));
+        assert_eq!(c.previous_kinds.len(), 2);
+        // Output removed in the meantime: back to OUT 1.
+        p.midi_outs.pop();
+        let k = p.channel(ch).unwrap().recall(ChannelKind::MidiOut { channel: 0, out: 0 });
+        replace_kind(&mut p, ch, k);
+        assert_eq!(p.channel(ch).unwrap().kind, ChannelKind::MidiOut { channel: 9, out: 0 });
+        assert_eq!(p.channel(ch).unwrap().previous_kinds, vec![ChannelKind::Synth(sp)]);
     }
 
     #[test]

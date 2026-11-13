@@ -612,20 +612,17 @@ impl App {
             self.ui.status = trf!("Chargement impossible : {e}", "Cannot load: {e}");
             return;
         }
-        let source = SampleSource::File(path.clone());
+        let source = SampleSource::File(path);
         self.loader.cache().invalidate(&source);
         let kind = ChannelKind::Sampler { source };
         match target {
             Some(id) => {
-                if let Some(ch) = self.project.channel_mut(id) {
-                    ch.kind = kind;
-                }
+                seq_edit::replace_kind(&mut self.project, id, kind);
                 // Force a rebuild even if the path is unchanged (file modified).
                 self.sent_kinds.remove(&id);
             }
             None => {
-                let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Sample".into());
-                match self.project.add_channel(&name, kind) {
+                match self.project.add_channel(&kind.default_name(), kind) {
                     Some(id) => self.ui.channel = Some(id),
                     None => self.ui.status = trf!("Maximum {MAX_CHANNELS} channels", "Maximum {MAX_CHANNELS} channels"),
                 }

@@ -4,7 +4,7 @@ use crate::icons::Icon;
 use crate::skin::{self, Kind};
 use crate::theme::*;
 use crate::widgets::Pointer;
-use crate::{Editor, PanelId, PlaybackInfo, SeqUi};
+use crate::{Editor, PanelId, PlaybackInfo, SeqUi, UiAction};
 use eframe::egui::{self, Align2, Color32, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use seq_edit::step_count;
 use seq_i18n::{tr, trf};
@@ -74,6 +74,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     });
     if res.expand {
         st.toggle_focus(PanelId::Rack);
+    }
+
+    if !ui.ctx().is_context_menu_open() {
+        st.replacing = None;
     }
 
     let inner = res.body.shrink2(vec2(12.0, 10.0));
@@ -150,6 +154,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             tresp.context_menu(|ui| {
                 ui.set_min_width(290.0);
                 skin::menu_caption(ui, &format!("{} · {}", ch.name.to_uppercase(), ch.kind.label().to_uppercase()));
+                if st.replacing == Some(ch.id) {
+                    replace_items(st, ui, project, &ch);
+                    return;
+                }
                 if skin::menu_item(ui, tr!("Ouvrir dans le piano roll", "Open in piano roll"), TEXT, false).clicked() {
                     st.channel = Some(ch.id);
                     st.active_editor = Editor::Piano;
@@ -163,6 +171,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 if skin::menu_item(ui, tr!("Dupliquer", "Duplicate"), TEXT, false).clicked() {
                     op = Some(RowOp::Duplicate(ch.id));
                     ui.close_menu();
+                }
+                if skin::menu_item(ui, tr!("Remplacer par…", "Replace with…"), TEXT, false).clicked() {
+                    st.replacing = Some(ch.id);
                 }
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
@@ -212,6 +223,46 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         }
         Some(RowOp::Move(id, up)) => seq_edit::move_channel(project, id, up),
         None => {}
+    }
+}
+
+/// Channel menu, "Replace with" page: another instrument for the channel, which keeps
+/// its notes and settings (the current one is highlighted).
+fn replace_items(st: &mut SeqUi, ui: &mut Ui, project: &mut Project, ch: &Channel) {
+    if skin::menu_item(ui, tr!("‹ Retour", "‹ Back"), TEXT_DIM, false).clicked() {
+        st.replacing = None;
+    }
+    skin::menu_caption(ui, tr!("REMPLACER PAR", "REPLACE WITH"));
+    let current_drum = match ch.kind {
+        ChannelKind::Sampler { source: SampleSource::Builtin(d) } => Some(d),
+        _ => None,
+    };
+    let mut kind = None;
+    // Room for the whole page on a phone in landscape.
+    let max_h = (ui.ctx().screen_rect().height() - 150.0).max(160.0);
+    egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+        if let Some(d) = crate::drum_grid(ui, current_drum) {
+            kind = Some(ChannelKind::Sampler { source: SampleSource::Builtin(d) });
+        }
+        skin::menu_separator(ui);
+        let is_file = matches!(ch.kind, ChannelKind::Sampler { source: SampleSource::File(_) });
+        if skin::menu_item(ui, tr!("Fichier WAV…", "WAV file…"), TEXT, is_file).clicked() {
+            st.act(UiAction::LoadSample(Some(ch.id)));
+            st.replacing = None;
+            ui.close_menu();
+        }
+        // Synth / MIDI out: the settings this channel had last time, if any.
+        if skin::menu_item(ui, tr!("Synthé", "Synth"), TEXT, matches!(ch.kind, ChannelKind::Synth(_))).clicked() {
+            kind = Some(ch.recall(ChannelKind::Synth(SynthParams::default())));
+        }
+        if skin::menu_item(ui, "MIDI out", TEXT, matches!(ch.kind, ChannelKind::MidiOut { .. })).clicked() {
+            kind = Some(ch.recall(ChannelKind::MidiOut { channel: 0, out: 0 }));
+        }
+    });
+    if let Some(kind) = kind {
+        seq_edit::replace_kind(project, ch.id, kind);
+        st.replacing = None;
+        ui.close_menu();
     }
 }
 

@@ -71,6 +71,17 @@ pub struct Channel {
     /// Real-time arpeggiator (missing from older files → disabled).
     #[serde(default)]
     pub arp: ArpParams,
+    /// Settings of the synth / MIDI out the channel had before its instrument was
+    /// replaced (at most one of each), restored when switching back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_kinds: Vec<ChannelKind>,
+}
+
+impl Channel {
+    /// `kind`, or the settings this channel last had for the same kind of instrument.
+    pub fn recall(&self, kind: ChannelKind) -> ChannelKind {
+        self.previous_kinds.iter().find(|k| k.same_kind(&kind)).cloned().unwrap_or(kind)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,6 +102,37 @@ impl ChannelKind {
             ChannelKind::Sampler { .. } => "Sampler",
             ChannelKind::Synth(_) => "Synth",
             ChannelKind::MidiOut { .. } => "MIDI out",
+        }
+    }
+
+    /// Same kind of instrument (sampler, synth or MIDI out), whatever the settings.
+    pub fn same_kind(&self, other: &ChannelKind) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+
+    /// Name given to a new channel of this kind.
+    pub fn default_name(&self) -> String {
+        match self {
+            ChannelKind::Sampler { source: SampleSource::Builtin(d) } => d.name().to_string(),
+            ChannelKind::Sampler { source: SampleSource::File(path) } => {
+                path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Sample".into())
+            }
+            ChannelKind::Synth(_) => "Synth".into(),
+            ChannelKind::MidiOut { .. } => "MIDI out".into(),
+        }
+    }
+
+    /// `name` is the default name of this kind, in any language (project created
+    /// before a language change).
+    pub fn is_default_name(&self, name: &str) -> bool {
+        seq_i18n::Lang::ALL.into_iter().any(|l| seq_i18n::with_lang(l, || self.default_name()) == name)
+    }
+
+    /// Step sequencer key of a new channel of this kind (samples: original pitch).
+    pub fn default_key(&self) -> u8 {
+        match self {
+            ChannelKind::Synth(_) => 48,
+            _ => 60,
         }
     }
 }
@@ -336,6 +378,7 @@ impl Project {
             default_key: 60,
             choke: 0,
             arp: ArpParams::default(),
+            previous_kinds: Vec::new(),
         }));
         Some(id)
     }

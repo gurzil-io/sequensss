@@ -262,13 +262,7 @@ fn son(st: &mut SeqUi, ui: &mut Ui, c: Rect, row_h: f32, project: &mut Project, 
 /// Previous / next sound (built-in sounds), or previous / next MIDI channel.
 fn cycle(project: &mut Project, id: ChannelId, dir: i32) {
     let Some(ch) = project.channel_mut(id) else { return };
-    let old_name_auto = match &ch.kind {
-        // Default name in any language (project created before a language change).
-        ChannelKind::Sampler { source: SampleSource::Builtin(d) } => {
-            seq_i18n::Lang::ALL.into_iter().any(|l| seq_i18n::with_lang(l, || d.name()) == ch.name)
-        }
-        _ => false,
-    };
+    let old_name_auto = matches!(ch.kind, ChannelKind::Sampler { source: SampleSource::Builtin(_) }) && ch.kind.is_default_name(&ch.name);
     match &mut ch.kind {
         ChannelKind::Sampler { source } => {
             let n = Drum::ALL.len() as i32;
