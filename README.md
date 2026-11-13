@@ -17,6 +17,8 @@ Sequensss takes the workflow of pattern-based DAWs (a channel rack, step sequenc
   <a href="https://github.com/emilk/egui"><img alt="Built with egui" src="https://img.shields.io/badge/built%20with-egui-46b03c?style=flat-square&labelColor=1e1a17"></a>
 </p>
 
+> **Vibe-coded, and open to everyone, forever.** Sequensss was built by vibe coding: fast, by ear, for the fun of making music software. It is MIT-licensed and will stay free and open. Fork it, hack it, bend it into your own instrument: no permission needed. See [Make it yours](#make-it-yours).
+
 ---
 
 ## Features
@@ -177,7 +179,15 @@ These features are out of scope for v0.1 and could come later:
 - MIDI clock sync
 - Audio recording
 
-Issues and pull requests are welcome.
+---
+
+## Make it yours
+
+This project belongs to everyone who uses it, so don't hesitate to change it.
+
+- **Fork it** and turn it into your own instrument. The MIT license lets you use, modify and share it, commercially or not, forever.
+- **Send a pull request**, big or small: a fix, a new sound, a translation, a UI tweak. The tests (`cargo test --workspace`) and the [architecture notes](#architecture) help you find your way around.
+- **Open an issue** for a bug or an idea. The [issue list](https://github.com/gurzil-io/sequensss/issues) is a good place to start; the `nice to have` label marks the bigger projects.
 
 ---
 
