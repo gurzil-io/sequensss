@@ -1279,7 +1279,7 @@ mod tests {
     fn metronome_clicks_on_beats() {
         for &(sr, beat) in &[(48_000u32, 24_000usize), (44_100, 22_050)] {
             let mut p = Project::empty();
-            p.patterns[0].length = 4 * PPQ as u64;
+            p.patterns[0].make_mut().length = 4 * PPQ as u64;
             let pat = p.patterns[0].id;
             let (mut e, _h) = Engine::new(sr, None, None);
             e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(&p))));
@@ -1443,7 +1443,9 @@ mod tests {
         for _ in values {
             p.add_channel("dc", ChannelKind::Synth(SynthParams::default())).unwrap();
         }
-        edit(&mut p.channels);
+        let mut chans: Vec<Channel> = p.channels.iter().map(|c| (**c).clone()).collect();
+        edit(&mut chans);
+        p.channels = chans.into_iter().map(CowArc::new).collect();
         let (mut e, _h) = Engine::new(48_000, None, None);
         for (c, &v) in p.channels.iter().zip(values) {
             e.handle_cmd(EngineCmd::SetSlot(c.id, SlotKind::Audio(Box::new(Dc(v)))));

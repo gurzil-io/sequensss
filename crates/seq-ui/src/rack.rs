@@ -103,7 +103,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 let fg = skin::paint_button(&p, r, 7.0, Kind::Tile, on, resp.is_pointer_button_down_on(), resp.hovered(), true);
                 p.text(r.center(), Align2::CENTER_CENTER, label, cond(17.0), fg);
                 if resp.clicked() {
-                    let c = &mut project.channels[i];
+                    let c = project.channels[i].make_mut();
                     if tag == 0 {
                         c.mute = !c.mute;
                     } else {

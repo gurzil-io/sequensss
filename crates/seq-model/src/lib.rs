@@ -6,8 +6,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub mod arp;
+mod cow;
 mod kits;
 pub use arp::{ARP_RATES, ArpChord, ArpDirection, ArpParams, arp_rate_name};
+pub use cow::CowArc;
 pub use kits::{KITS, Kit};
 
 /// Ticks per quarter note.
@@ -34,8 +36,9 @@ pub struct Project {
     pub time_sig: (u8, u8),
     /// 0.0..=1.0
     pub swing: f32,
-    pub channels: Vec<Channel>,
-    pub patterns: Vec<Pattern>,
+    /// Channels and patterns are shared between snapshots (undo, engine) until modified.
+    pub channels: Vec<CowArc<Channel>>,
+    pub patterns: Vec<CowArc<Pattern>>,
     pub arrangement: Arrangement,
     /// Next free id (shared by channels / patterns). Never reused.
     pub next_id: u32,
@@ -285,11 +288,11 @@ impl Project {
     }
 
     pub fn channel(&self, id: ChannelId) -> Option<&Channel> {
-        self.channels.iter().find(|c| c.id == id)
+        self.channels.iter().find(|c| c.id == id).map(|c| &**c)
     }
 
     pub fn channel_mut(&mut self, id: ChannelId) -> Option<&mut Channel> {
-        self.channels.iter_mut().find(|c| c.id == id)
+        self.channels.iter_mut().find(|c| c.id == id).map(CowArc::make_mut)
     }
 
     /// Whether the playlist has a clip that plays something: a non-zero length and an
@@ -299,21 +302,21 @@ impl Project {
     }
 
     pub fn pattern(&self, id: PatternId) -> Option<&Pattern> {
-        self.patterns.iter().find(|p| p.id == id)
+        self.patterns.iter().find(|p| p.id == id).map(|p| &**p)
     }
 
     pub fn pattern_mut(&mut self, id: PatternId) -> Option<&mut Pattern> {
-        self.patterns.iter_mut().find(|p| p.id == id)
+        self.patterns.iter_mut().find(|p| p.id == id).map(CowArc::make_mut)
     }
 
     pub fn add_pattern(&mut self, name: &str, length: Tick) -> PatternId {
         let id = PatternId(self.alloc_id());
-        self.patterns.push(Pattern {
+        self.patterns.push(CowArc::new(Pattern {
             id,
             name: name.to_string(),
             length,
             notes: BTreeMap::new(),
-        });
+        }));
         id
     }
 
@@ -322,7 +325,7 @@ impl Project {
             return None;
         }
         let id = ChannelId(self.alloc_id());
-        self.channels.push(Channel {
+        self.channels.push(CowArc::new(Channel {
             id,
             name: name.to_string(),
             kind,
@@ -333,7 +336,7 @@ impl Project {
             default_key: 60,
             choke: 0,
             arp: ArpParams::default(),
-        });
+        }));
         Some(id)
     }
 

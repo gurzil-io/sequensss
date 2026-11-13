@@ -17,7 +17,7 @@ pub enum SlotUpdate {
 /// Slot changes between `sent` (kinds last sent to the engine) and `channels`: removals
 /// first, then one update per new or changed channel, in channel order (at most
 /// `MAX_CHANNELS` channels). Volume, pan, mute… only change the graph, not the slots.
-pub fn slot_updates(sent: &HashMap<ChannelId, ChannelKind>, channels: &[Channel]) -> Vec<SlotUpdate> {
+pub fn slot_updates(sent: &HashMap<ChannelId, ChannelKind>, channels: &[CowArc<Channel>]) -> Vec<SlotUpdate> {
     let mut out: Vec<SlotUpdate> = sent
         .keys()
         .filter(|id| !channels.iter().any(|c| c.id == **id))

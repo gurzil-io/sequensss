@@ -2,25 +2,48 @@
 //!
 //! Snapshot-based undo: the app calls [`History::commit_if_changed`] every frame.
 //! While a gesture is in progress (mouse button held, keyboard input), nothing is
-//! committed: a whole drag = a single undo entry.
+//! committed: a whole drag = a single undo entry. Snapshots share the channels and
+//! patterns that did not change (`CowArc`), so an entry costs about what the gesture
+//! modified, and comparing the project with the last snapshot is cheap.
 
 use seq_model::*;
+use std::collections::{HashSet, VecDeque};
 
 mod record;
 mod sync;
 pub use record::{RecordedNote, Recorder};
 pub use sync::{SlotUpdate, exports_song, slot_updates};
 
+/// Default memory budget of the undo history (estimated).
+pub const HISTORY_BUDGET: usize = 64 << 20;
+
 pub struct History {
     committed: Project,
-    undo: Vec<Project>,
+    /// Oldest first, with the memory each entry holds on its own (not shared with
+    /// the next, more recent state).
+    undo: VecDeque<(Project, usize)>,
     redo: Vec<Project>,
     limit: usize,
+    budget: usize,
+    undo_bytes: usize,
 }
 
 impl History {
     pub fn new(initial: &Project, limit: usize) -> Self {
-        History { committed: initial.clone(), undo: Vec::new(), redo: Vec::new(), limit: limit.max(1) }
+        History {
+            committed: initial.clone(),
+            undo: VecDeque::new(),
+            redo: Vec::new(),
+            limit: limit.max(1),
+            budget: HISTORY_BUDGET,
+            undo_bytes: 0,
+        }
+    }
+
+    /// Caps the undo entries by estimated memory too (the most recent entry is always kept).
+    pub fn with_budget(mut self, bytes: usize) -> Self {
+        self.budget = bytes;
+        self
     }
 
     /// Resets the history (new project / open).
@@ -28,6 +51,7 @@ impl History {
         self.committed = p.clone();
         self.undo.clear();
         self.redo.clear();
+        self.undo_bytes = 0;
     }
 
     /// Records an undo entry if the project changed and no gesture is in progress.
@@ -37,10 +61,7 @@ impl History {
             return false;
         }
         let prev = std::mem::replace(&mut self.committed, current.clone());
-        self.undo.push(prev);
-        if self.undo.len() > self.limit {
-            self.undo.remove(0);
-        }
+        self.push_undo(prev);
         self.redo.clear();
         true
     }
@@ -48,8 +69,9 @@ impl History {
     pub fn undo(&mut self, current: &mut Project) -> bool {
         // An uncommitted change is committed first, so it can be redone.
         self.commit_if_changed(current, false);
-        match self.undo.pop() {
-            Some(prev) => {
+        match self.undo.pop_back() {
+            Some((prev, bytes)) => {
+                self.undo_bytes -= bytes;
                 let now = std::mem::replace(&mut self.committed, prev.clone());
                 self.redo.push(now);
                 *current = prev;
@@ -63,11 +85,22 @@ impl History {
         match self.redo.pop() {
             Some(next) => {
                 let now = std::mem::replace(&mut self.committed, next.clone());
-                self.undo.push(now);
+                self.push_undo(now);
                 *current = next;
                 true
             }
             None => false,
+        }
+    }
+
+    /// `prev` precedes `self.committed`.
+    fn push_undo(&mut self, prev: Project) {
+        let bytes = unshared_bytes(&prev, &self.committed);
+        self.undo_bytes += bytes;
+        self.undo.push_back((prev, bytes));
+        while self.undo.len() > self.limit || (self.undo_bytes > self.budget && self.undo.len() > 1) {
+            let (_, b) = self.undo.pop_front().unwrap();
+            self.undo_bytes -= b;
         }
     }
 
@@ -78,6 +111,38 @@ impl History {
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
+
+    /// Number of undo entries.
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Estimated memory held by the undo entries.
+    pub fn undo_bytes(&self) -> usize {
+        self.undo_bytes
+    }
+}
+
+/// Estimated memory of `old` that is not shared with `new`.
+fn unshared_bytes(old: &Project, new: &Project) -> usize {
+    use std::mem::size_of;
+    let channels: HashSet<*const Channel> = new.channels.iter().map(CowArc::as_ptr).collect();
+    let patterns: HashSet<*const Pattern> = new.patterns.iter().map(CowArc::as_ptr).collect();
+    let mut bytes = size_of::<Project>()
+        + old.channels.len() * size_of::<CowArc<Channel>>()
+        + old.patterns.len() * size_of::<CowArc<Pattern>>()
+        + old.arrangement.clips.len() * size_of::<Clip>();
+    for c in old.channels.iter().filter(|c| !channels.contains(&CowArc::as_ptr(c))) {
+        bytes += size_of::<Channel>() + c.name.len();
+    }
+    for p in old.patterns.iter().filter(|p| !patterns.contains(&CowArc::as_ptr(p))) {
+        bytes += size_of::<Pattern>() + p.name.len();
+        for notes in p.notes.values() {
+            // Rough cost of a map entry + the notes.
+            bytes += 64 + notes.capacity() * size_of::<Note>();
+        }
+    }
+    bytes
 }
 
 // ---------------------------------------------------------------------------
@@ -134,8 +199,9 @@ pub fn set_step(project: &mut Project, pattern: PatternId, channel: ChannelId, s
 
 pub fn remove_channel(project: &mut Project, channel: ChannelId) {
     project.channels.retain(|c| c.id != channel);
-    for p in &mut project.patterns {
-        p.notes.remove(&channel);
+    // Only the patterns that use the channel are copied.
+    for p in project.patterns.iter_mut().filter(|p| p.notes.contains_key(&channel)) {
+        p.make_mut().notes.remove(&channel);
     }
 }
 
@@ -144,10 +210,11 @@ pub fn duplicate_channel(project: &mut Project, channel: ChannelId) -> Option<Ch
     let id = project.add_channel(&format!("{} (2)", src.name), src.kind.clone())?;
     let pos = project.channels.iter().position(|c| c.id == channel)?;
     let mut ch = project.channels.pop()?;
-    ch.volume = src.volume;
-    ch.pan = src.pan;
-    ch.default_key = src.default_key;
-    ch.choke = src.choke;
+    let c = ch.make_mut();
+    c.volume = src.volume;
+    c.pan = src.pan;
+    c.default_key = src.default_key;
+    c.choke = src.choke;
     project.channels.insert(pos + 1, ch);
     Some(id)
 }
@@ -581,6 +648,85 @@ mod tests {
         assert!(!step_is_on(p.pattern(pat).unwrap(), ch, 0));
         assert!(h.redo(&mut p));
         assert!(step_is_on(p.pattern(pat).unwrap(), ch, 0));
+    }
+
+    /// `n` patterns of `notes` notes each, on one channel.
+    fn big_project(n: usize, notes: u64) -> (Project, ChannelId) {
+        let (mut p, _, ch) = setup();
+        p.patterns.clear();
+        for i in 0..n {
+            let id = p.add_pattern(&format!("P{i}"), notes * STEP);
+            let ns = (0..notes).map(|t| Note { start: t * STEP, len: STEP, key: 60, velocity: 100 }).collect();
+            p.pattern_mut(id).unwrap().notes.insert(ch, ns);
+        }
+        (p, ch)
+    }
+
+    fn nudge(p: &mut Project, pattern: usize, ch: ChannelId) {
+        let pat = p.patterns[pattern].make_mut();
+        pat.notes.get_mut(&ch).unwrap()[0].key += 1;
+    }
+
+    #[test]
+    fn snapshots_share_unchanged_patterns() {
+        let (mut p, ch) = big_project(32, 1000);
+        let mut h = History::new(&p, 200);
+        for i in 0..200 {
+            nudge(&mut p, i % 32, ch);
+            assert!(h.commit_if_changed(&p, false));
+        }
+        assert_eq!(h.undo_len(), 200);
+        // Each entry holds about one pattern (1000 notes), not the 32.
+        let pattern = 1000 * std::mem::size_of::<Note>();
+        assert!(h.undo_bytes() < 200 * pattern * 3 / 2, "{}", h.undo_bytes());
+        // Undo restores the right notes and shares the patterns it did not touch.
+        let before = p.clone();
+        nudge(&mut p, 5, ch);
+        h.commit_if_changed(&p, false);
+        assert!(h.undo(&mut p));
+        assert_eq!(p, before);
+        assert!((0..32).filter(|&i| i != 5).all(|i| CowArc::ptr_eq(&p.patterns[i], &before.patterns[i])));
+    }
+
+    #[test]
+    fn history_memory_stays_bounded() {
+        // One large pattern: every entry holds a full copy of it.
+        let (mut p, ch) = big_project(1, 20_000);
+        let budget = 4 << 20;
+        let mut h = History::new(&p, 200).with_budget(budget);
+        let mut states = vec![p.clone()];
+        for _ in 0..100 {
+            nudge(&mut p, 0, ch);
+            h.commit_if_changed(&p, false);
+            states.push(p.clone());
+        }
+        let kept = h.undo_len();
+        assert!(kept > 1 && kept < 100, "{kept}");
+        assert!(h.undo_bytes() <= budget);
+        // The most recent entries can still be undone, in order.
+        for i in 0..kept {
+            assert!(h.undo(&mut p));
+            assert_eq!(p, states[states.len() - 2 - i]);
+        }
+        assert!(!h.undo(&mut p));
+        // And redone.
+        while h.redo(&mut p) {}
+        assert_eq!(p, *states.last().unwrap());
+    }
+
+    #[test]
+    fn history_limit_drops_oldest() {
+        let (mut p, pat, ch) = setup();
+        let mut h = History::new(&p, 3);
+        for step in 0..5 {
+            set_step(&mut p, pat, ch, step, true);
+            h.commit_if_changed(&p, false);
+        }
+        assert_eq!(h.undo_len(), 3);
+        while h.undo(&mut p) {}
+        // Steps 0 and 1 are older than the limit: they stay.
+        assert!(step_is_on(p.pattern(pat).unwrap(), ch, 1));
+        assert!(!step_is_on(p.pattern(pat).unwrap(), ch, 2));
     }
 
     #[test]

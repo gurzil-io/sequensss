@@ -112,7 +112,7 @@ pub fn write_midi(path: &Path, p: &Project, fallback: PatternId) -> Result<()> {
         .channels
         .iter()
         .filter(|ch| !ch.mute && (!any_solo || ch.solo))
-        .map(|ch| (ch, without_overlaps(flatten_channel(p, ch.id, fallback))))
+        .map(|ch| (&**ch, without_overlaps(flatten_channel(p, ch.id, fallback))))
         .filter(|(_, notes)| !notes.is_empty())
         .collect();
     // Synths take the channels left free by the drums (10) and the MIDI out tracks, in

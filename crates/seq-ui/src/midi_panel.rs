@@ -158,8 +158,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) {
     // those on the following outputs are shifted down.
     if let Some(i) = remove {
         project.midi_outs.remove(i);
-        for c in project.channels.iter_mut() {
-            if let ChannelKind::MidiOut { out, .. } = &mut c.kind {
+        for c in project.channels.iter_mut().filter(|c| matches!(c.kind, ChannelKind::MidiOut { out, .. } if out as usize >= i)) {
+            if let ChannelKind::MidiOut { out, .. } = &mut c.make_mut().kind {
                 let o = *out as usize;
                 if o == i {
                     *out = 0;
