@@ -34,6 +34,7 @@ The goal is to make life easier for dawless setups **without becoming a DAW**:
 
 **Driving your synths (MIDI)**
 - **MIDI out:** up to 8 outputs, a MIDI channel and an output per track. Events are scheduled against the audio output latency, so hardware and built-in sounds stay in sync.
+- **MIDI clock out:** per output, 24 PPQN clock with Start / Stop / Continue and Song Position Pointer, so drum machines, arpeggiators and grooveboxes follow the sequencer.
 - **MIDI in:** play the selected track live from a keyboard, or record into a pattern with optional quantize. Notes land where you played them.
 - **USB MIDI on Android** (interfaces and controllers, hot-plug), and any MIDI port on desktop.
 - **Metronome.**
@@ -187,7 +188,6 @@ crates/
 The compass: **make dawless setups easier, stay light.** A feature gets in if it helps drive hardware, or makes sketching sequences faster, without turning Sequensss into a DAW.
 
 **Next, for the hardware rig**
-- **MIDI clock out** (24 PPQN, Start/Stop) to keep drum machines, arpeggiators and grooveboxes in sync ([#4](https://github.com/gurzil-io/sequensss/issues/4)).
 - **Swap a track between a built-in sound and MIDI out** while keeping its notes: sketch on the built-in synth, then send it to the real one ([#9](https://github.com/gurzil-io/sequensss/issues/9)).
 
 **Ideas, only if they stay optional and lightweight**

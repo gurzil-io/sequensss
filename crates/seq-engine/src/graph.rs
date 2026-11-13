@@ -73,6 +73,8 @@ pub struct PlaybackGraph {
     /// Sorted by start.
     pub song: Vec<CompiledClip>,
     pub song_length: Tick,
+    /// MIDI outputs sending clock (bit i = output i).
+    pub clock_outs: u8,
 }
 
 impl PlaybackGraph {
@@ -215,6 +217,7 @@ fn assemble(p: &Project, channels: Vec<ChannelParams>, patterns: Vec<CompiledPat
         patterns,
         song,
         song_length,
+        clock_outs: p.midi_clock_mask(),
     }
 }
 

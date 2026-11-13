@@ -42,12 +42,26 @@ fn note_key(bytes: &[u8; 3]) -> Option<(u8, u8)> {
     matches!(bytes[0] & 0xF0, 0x80 | 0x90).then_some((bytes[0] & 0x0F, bytes[1]))
 }
 
+/// System messages: clock, Start / Stop / Continue, SPP.
+fn is_system(bytes: &[u8; 3]) -> bool {
+    bytes[0] >= 0xF0
+}
+
 fn insert(queue: &mut VecDeque<Pending>, mut p: Pending) {
     // A note on/off never overtakes an earlier one for the same key and port (the
     // latency reported by the audio driver may jitter from one callback to the next).
+    // Likewise, clock and transport messages keep their order on a port. The two rules
+    // are independent: a pulse is never held back by a note, nor a note by a pulse.
     if let Some(k) = note_key(&p.bytes) {
         for q in queue.iter().rev() {
             if q.port == p.port && note_key(&q.bytes) == Some(k) {
+                p.at = p.at.max(q.at);
+                break;
+            }
+        }
+    } else if is_system(&p.bytes) {
+        for q in queue.iter().rev() {
+            if q.port == p.port && is_system(&q.bytes) {
                 p.at = p.at.max(q.at);
                 break;
             }
@@ -380,6 +394,33 @@ mod tests {
         got.clear();
         s.send_due(t + 50 * us, |p, b| got.push((p, *b)));
         assert_eq!(got, vec![(1, [0x80, 60, 0]), (1, [0x90, 60, 100])]);
+    }
+
+    #[test]
+    fn realtime_messages_keep_order_and_ignore_note_rule() {
+        let mut s = Scheduler::default();
+        let t = Instant::now();
+        let us = Duration::from_micros(1);
+        // A pending note-off does not hold back clock or transport messages.
+        s.insert(Pending { at: t + 50 * us, port: 0, bytes: [0x80, 60, 0] });
+        s.insert(Pending { at: t + 10 * us, port: 0, bytes: [0xF8, 0, 0] });
+        // Next callback with a lower latency estimate: SPP + Continue stamped before the
+        // previous pulse still go out after it.
+        s.insert(Pending { at: t + 5 * us, port: 0, bytes: [0xF2, 4, 0] });
+        s.insert(Pending { at: t + 5 * us, port: 0, bytes: [0xFB, 0, 0] });
+        // Other port: not held back.
+        s.insert(Pending { at: t + 5 * us, port: 1, bytes: [0xF8, 0, 0] });
+        // A note is not held back by a pulse.
+        s.insert(Pending { at: t + 5 * us, port: 0, bytes: [0x90, 61, 100] });
+        let mut got = Vec::new();
+        s.send_due(t + 20 * us, |p, b| got.push((p, *b)));
+        assert_eq!(
+            got,
+            vec![(1, [0xF8, 0, 0]), (0, [0x90, 61, 100]), (0, [0xF8, 0, 0]), (0, [0xF2, 4, 0]), (0, [0xFB, 0, 0])]
+        );
+        got.clear();
+        s.send_due(t + 50 * us, |p, b| got.push((p, *b)));
+        assert_eq!(got, vec![(0, [0x80, 60, 0])]);
     }
 
     #[test]
