@@ -197,7 +197,12 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 
             // Steps
             let steps = Rect::from_min_max(pos2(tile.right() + 11.0, row.top()), row.max);
-            steps_row(st, ui, &p, steps, project, pat_id, ch.id, color, playing_step, &pointer);
+            let melodic = project.pattern(pat_id).and_then(|p| p.notes.get(&ch.id)).is_some_and(|n| !seq_edit::fits_steps(n));
+            if melodic {
+                note_preview(st, ui, &p, steps, project, pat_id, ch.id, color, playing_step);
+            } else {
+                steps_row(st, ui, &p, steps, project, pat_id, ch.id, color, playing_step, &pointer);
+            }
         }
 
         ui.add_space(4.0);
@@ -366,5 +371,55 @@ fn steps_row(
         && let Some(i) = cell_at(pos.x)
     {
         seq_edit::set_step(project, pat_id, ch, i, val);
+    }
+}
+
+/// Mini piano roll in place of the steps, for a channel the steps cannot show (several
+/// keys, notes off the grid): the whole pattern across, the channel's key range from
+/// bottom to top (an octave at least). A tap opens the piano roll.
+#[allow(clippy::too_many_arguments)]
+fn note_preview(
+    st: &mut SeqUi,
+    ui: &mut Ui,
+    p: &egui::Painter,
+    area: Rect,
+    project: &Project,
+    pat_id: PatternId,
+    ch: ChannelId,
+    color: Color32,
+    playing_step: Option<usize>,
+) {
+    let Some(pat) = project.pattern(pat_id) else { return };
+    let notes = pat.notes.get(&ch).map(Vec::as_slice).unwrap_or_default();
+    let len = pat.length.max(1);
+    let resp = ui.interact(area, ui.id().with(("preview", ch.0)), Sense::click());
+    p.rect_filled(area, 6.0, STEP_OFF_A);
+    // Beat bands, like the step groups.
+    let beats = len.div_ceil(4 * STEP);
+    let x_of = |t: Tick| area.left() + t as f32 / len as f32 * area.width();
+    for b in (1..beats).step_by(2) {
+        let r = Rect::from_min_max(pos2(x_of(b * 4 * STEP), area.top()), pos2(x_of(((b + 1) * 4 * STEP).min(len)), area.bottom()));
+        p.rect_filled(r, 0.0, STEP_OFF_B);
+    }
+    let inner = area.shrink2(vec2(2.0, 4.0));
+    let (lo, hi) = seq_edit::preview_keys(notes, 12);
+    let row = inner.height() / (hi - lo + 1) as f32;
+    let nh = row.clamp(2.0, 5.0);
+    for n in notes {
+        let y = inner.bottom() - (n.key - lo) as f32 * row - (row + nh) / 2.0;
+        let x0 = x_of(n.start);
+        let x1 = x_of((n.start + n.len).min(len)).max(x0 + 2.0);
+        p.rect_filled(Rect::from_min_max(pos2(x0, y), pos2(x1 - 1.0, y + nh)).intersect(area), 1.0, color);
+    }
+    if let Some(s) = playing_step {
+        let n = seq_edit::step_count(pat).max(1);
+        let x = x_of((s % n) as Tick * STEP);
+        p.line_segment([pos2(x, area.top()), pos2(x, area.bottom())], Stroke::new(2.0_f32, Color32::WHITE));
+    }
+    p.rect_stroke(area, 6.0, Stroke::new(1.0_f32, with_alpha(color, 110)));
+    if resp.on_hover_text(tr!("Notes du piano roll · toucher pour l'ouvrir", "Piano roll notes · tap to open it")).clicked() {
+        st.channel = Some(ch);
+        st.active_editor = Editor::Piano;
+        st.show_panel(PanelId::Piano);
     }
 }

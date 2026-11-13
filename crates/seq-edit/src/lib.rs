@@ -193,6 +193,27 @@ pub fn set_step(project: &mut Project, pattern: PatternId, channel: ChannelId, s
     }
 }
 
+/// Whether the step row shows these notes faithfully: a single key, every note starting
+/// on a step. Otherwise the rack shows a mini piano roll of the channel instead.
+pub fn fits_steps(notes: &[Note]) -> bool {
+    notes.iter().all(|n| n.key == notes[0].key && n.start.is_multiple_of(STEP))
+}
+
+/// Key range (lowest, highest) of a mini piano roll that fits the notes, at least
+/// `min_span` keys tall (centred on the notes) so a single line sits in the middle.
+pub fn preview_keys(notes: &[Note], min_span: u8) -> (u8, u8) {
+    let (lo, hi) = notes.iter().fold((127u8, 0u8), |(a, b), n| (a.min(n.key), b.max(n.key)));
+    let (lo, hi) = if lo > hi { (60, 60) } else { (lo, hi) };
+    let span = hi - lo + 1;
+    if span >= min_span {
+        return (lo, hi);
+    }
+    let extra = min_span.min(128) - span;
+    let lo = lo.saturating_sub(extra.div_ceil(2));
+    let hi = (lo as u16 + min_span.min(128) as u16 - 1).min(127) as u8;
+    (hi + 1 - min_span.min(128), hi)
+}
+
 // ---------------------------------------------------------------------------
 // Channels & patterns
 // ---------------------------------------------------------------------------
@@ -911,6 +932,28 @@ mod tests {
 
     fn n(start: Tick, len: Tick, key: u8) -> Note {
         Note { start, len, key, velocity: 100 }
+    }
+
+    #[test]
+    fn fits_steps_single_key_on_grid() {
+        assert!(fits_steps(&[]));
+        assert!(fits_steps(&[n(0, STEP, 36), n(4 * STEP, 3 * STEP, 36)]));
+        assert!(!fits_steps(&[n(0, STEP, 36), n(STEP, STEP, 38)]));
+        assert!(!fits_steps(&[n(STEP / 2, STEP, 36)]));
+    }
+
+    #[test]
+    fn preview_keys_fit_with_minimum_span() {
+        // Wide range: exactly the notes.
+        assert_eq!(preview_keys(&[n(0, 1, 40), n(0, 1, 70)], 12), (40, 70));
+        // One key: an octave around it.
+        let (lo, hi) = preview_keys(&[n(0, 1, 60)], 12);
+        assert_eq!(hi - lo + 1, 12);
+        assert!(lo < 60 && hi > 60);
+        // Near the edges: shifted, still in 0..=127.
+        assert_eq!(preview_keys(&[n(0, 1, 1)], 12), (0, 11));
+        assert_eq!(preview_keys(&[n(0, 1, 126)], 12), (116, 127));
+        assert_eq!(preview_keys(&[n(0, 1, 0), n(0, 1, 127)], 12), (0, 127));
     }
 
     #[test]
