@@ -162,7 +162,8 @@ impl App {
         match audio::prepare_output(self.audio_choice.as_deref()) {
             Ok(prep) => {
                 let sr = prep.sample_rate;
-                let (engine, handle) = Engine::new(sr, Some(in_rx), Some(out_tx));
+                let (mut engine, handle) = Engine::new(sr, Some(in_rx), Some(out_tx));
+                engine.set_midi_out_waker(self.midi_out.waker());
                 match audio::start_output(prep, engine) {
                     Ok(a) => {
                         self.sample_rate = a.sample_rate;

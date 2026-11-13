@@ -3,7 +3,9 @@
 //! - Port names are built on the Kotlin side ("device" or "device · port").
 //! - MIDI in: Kotlin calls `MidiBridge.nativeOnMidi(handle, bytes…)` from its MIDI thread;
 //!   `handle` points to an `InState` (producer to the engine + stream parser).
-//! - MIDI out: `send` is called by the MIDI out thread (not the audio thread).
+//! - MIDI out: `send` is called by the MIDI out thread (not the audio thread) when the
+//!   message is due. No future timestamp is passed to `MidiInputPort.send`: honouring it is
+//!   left to each device's service (USB, BLE, virtual), with no guarantee on precision.
 //! - Hot-plug: `devices_generation()` changes each time a device is added or removed.
 
 use super::{MidiInConn, MidiInTx, MidiParser, push_in};

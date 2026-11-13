@@ -11,6 +11,7 @@ use seq_engine::Engine;
 use seq_i18n::{tr, trf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 /// Name of the single output (follows the current language: never in a `const`).
 fn device_name() -> &'static str {
@@ -80,10 +81,13 @@ impl AudioOutputCallback for Callback {
         frames: &mut [(f32, f32)],
     ) -> DataCallbackResult {
         let latency = stream.calculate_latency_millis().map(|ms| ms / 1000.0).unwrap_or(0.0);
+        // One clock reading per callback: chunk `i` is heard `i · SCRATCH_FRAMES` frames later.
+        let now = Instant::now();
+        let sr = self.engine.sample_rate() as f64;
         // No (f32, f32) → [f32] cast: tuple layout is not guaranteed.
-        for chunk in frames.chunks_mut(SCRATCH_FRAMES) {
+        for (i, chunk) in frames.chunks_mut(SCRATCH_FRAMES).enumerate() {
             let buf = &mut self.scratch[..chunk.len() * 2];
-            self.engine.process(buf, 2, latency);
+            self.engine.process_at(buf, 2, latency + (i * SCRATCH_FRAMES) as f64 / sr, now);
             for (f, s) in chunk.iter_mut().zip(buf.chunks_exact(2)) {
                 *f = (s[0], s[1]);
             }
