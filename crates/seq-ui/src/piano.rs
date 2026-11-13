@@ -68,6 +68,9 @@ pub struct PianoState {
     /// Pattern length when the current gesture began: notes placed past the end grow the
     /// pattern, and dragging them back shrinks it again, never below this length.
     grow_base: Option<(PatternId, Tick)>,
+    /// Note created by a tap on empty space, and when: the second tap of a double tap
+    /// there must not delete it.
+    fresh: Option<(usize, f64)>,
 }
 
 impl Default for PianoState {
@@ -86,6 +89,7 @@ impl Default for PianoState {
             clipboard: Vec::new(),
             centered_for: None,
             grow_base: None,
+            fresh: None,
         }
     }
 }
@@ -388,6 +392,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                             ps.selected = vec![idx];
                             let orig = snapshot_of(&notes, &ps.selected);
                             ps.drag = Some(Drag::Move { anchor: idx, grab: t as i64 - start as i64, key, orig, fresh: true });
+                            ps.fresh = Some((idx, pointer.time));
                             actions.push(UiAction::Preview { channel: ch, key, vel: 100, on: true });
                         }
                     }
@@ -396,6 +401,25 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         } else if pointer.secondary_pressed && grid.contains(pos) {
             ps.drag = Some(Drag::Erase);
         }
+    }
+
+    // --- Double tap on a note: delete it (quick delete on touch, no tool change) ---
+    if pointer.double_clicked
+        && tool != Tool::Erase
+        && !pointer.shift
+        && !pointer.command
+        && let Some(pos) = pointer.pos.filter(|p| resp.hovered() && grid.contains(*p))
+        && let Some(idx) = hit(&notes, pos)
+        && !ps.fresh.is_some_and(|(i, t)| i == idx && pointer.time - t < 1.0)
+    {
+        // The second tap started a move or a resize of that note: dropped with it.
+        if let Some(Drag::Move { key, .. }) = ps.drag.take() {
+            actions.push(UiAction::Preview { channel: ch, key, vel: 0, on: false });
+        }
+        notes.remove(idx);
+        ps.selected.clear();
+        // The notes were drawn before this: show the deletion now, not at the next input.
+        ui.ctx().request_repaint();
     }
 
     // --- Mouse: drag / release ---
