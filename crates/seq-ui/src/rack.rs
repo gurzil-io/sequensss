@@ -119,8 +119,14 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             let tresp = ui.interact(tile, ui.id().with(("tile", ch.id.0)), Sense::click());
             p.rect_filled(tile, 7.0, if selected { TILE_SEL } else if tresp.hovered() { hex(0x40372f) } else { TILE });
             p.rect_stroke(tile, 7.0, if selected { Stroke::new(2.0_f32, ORANGE) } else { Stroke::new(1.0_f32, EDGE) });
-            skin::led(&p, pos2(tile.left() + 16.0, tile.center().y), 6.0, color, true);
-            let name_color = if ch.mute { with_alpha(TEXT, 115) } else { TEXT };
+            // Sample loading: blinking LED, dimmed name.
+            let loading = st.loading.contains(&ch.id);
+            let blink = loading && (ui.input(|i| i.time) * 4.0) as i64 % 2 == 1;
+            skin::led(&p, pos2(tile.left() + 16.0, tile.center().y), 6.0, if blink { with_alpha(color, 60) } else { color }, !blink);
+            if loading {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(125));
+            }
+            let name_color = if ch.mute || loading { with_alpha(TEXT, 115) } else { TEXT };
             p.with_clip_rect(tile.shrink(2.0)).text(pos2(tile.left() + 31.0, tile.center().y), Align2::LEFT_CENTER, &ch.name, body(16.0), name_color);
             let lvl = info.levels.get(&ch.id).map(|l| l.0.max(l.1)).unwrap_or(0.0);
             let frac = ((20.0 * lvl.max(1e-6).log10() + 48.0) / 48.0).clamp(0.0, 1.0);
@@ -136,7 +142,11 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 st.active_editor = Editor::Piano;
                 st.show_panel(PanelId::Piano);
             }
-            let tresp = tresp.on_hover_text(trf!("{} — {}\nDouble-clic : piano roll · clic droit / appui long : menu", "{} — {}\nDouble-click: piano roll · right-click / long press: menu", ch.name, ch.kind.label()));
+            let mut hover = trf!("{} — {}\nDouble-clic : piano roll · clic droit / appui long : menu", "{} — {}\nDouble-click: piano roll · right-click / long press: menu", ch.name, ch.kind.label());
+            if loading {
+                hover.push_str(tr!("\nChargement du sample…", "\nLoading sample…"));
+            }
+            let tresp = tresp.on_hover_text(hover);
             tresp.context_menu(|ui| {
                 ui.set_min_width(290.0);
                 skin::menu_caption(ui, &format!("{} · {}", ch.name.to_uppercase(), ch.kind.label().to_uppercase()));

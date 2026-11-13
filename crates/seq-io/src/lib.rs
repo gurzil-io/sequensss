@@ -9,6 +9,7 @@ pub mod export;
 #[path = "platform_android.rs"]
 pub mod platform;
 pub mod instruments;
+pub mod loader;
 pub mod midi;
 pub mod project_file;
 pub mod samples;
