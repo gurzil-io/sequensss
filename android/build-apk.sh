@@ -14,6 +14,13 @@ ABIS="${ABIS:-arm64-v8a}"
 TARGETS=()
 for a in $ABIS; do TARGETS+=(-t "$a"); done
 
+# Release: rebuild the app crates so the version they embed (update check) is the current one.
+if [ "${1:-}" = "--release" ]; then
+  for a in $ABIS; do
+    case $a in arm64-v8a) t=aarch64-linux-android ;; x86_64) t=x86_64-linux-android ;; *) continue ;; esac
+    cargo clean -q --release --target "$t" -p sequensss -p seq-android
+  done
+fi
 cargo ndk "${TARGETS[@]}" --platform 29 -o android/app/src/main/jniLibs build --release -p seq-android
 [ "${1:-}" = "--rust" ] && exit 0
 
