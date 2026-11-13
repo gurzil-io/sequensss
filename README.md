@@ -211,11 +211,13 @@ This project belongs to everyone who uses it, so don't hesitate to change it.
 
 Issues are tracked on the [project board](https://github.com/orgs/gurzil-io/projects/1): **Backlog → Todo → In progress → To test → Done**.
 
-1. When a change is ready, its issue moves to **To test** and a **test build** is published: a [pre-release](https://github.com/gurzil-io/sequensss/releases) tagged `vX.Y.Z-test.N`, whose notes list the issues to check.
-2. On Android, the test build is a separate app, **Sequensss Test**, installed next to the stable one, so you can test without touching your real setup. Desktop test builds are regular binaries.
+1. When a change is ready, its issue moves to **To test** and the **beta** is updated. There is a single beta, always at the same link: [**releases/tag/beta**](https://github.com/gurzil-io/sequensss/releases/tag/beta). Its notes list the issues to check.
+2. On Android, the beta is a separate app, **Sequensss Beta**, installed next to the stable one, so you can test without touching your real setup. Install each new beta APK over the previous one. Desktop betas are regular binaries.
 3. If the change works, close the issue: it moves to **Done**. If not, comment on it and it goes back to **In progress**.
 
-Test builds are never offered by the in-app update check, which only follows stable releases.
+### Versions
+
+[Semantic versioning](https://semver.org): `MAJOR.MINOR.PATCH`. While in `0.x`, a minor bump (`0.2.0`) brings features or breaking changes, a patch bump (`0.2.1`) only fixes bugs. Betas are previews of the next stable version: `0.2.0-beta.1`, `0.2.0-beta.2`, then `0.2.0`. The version lives in one place, the workspace `Cargo.toml`; the Android version code is derived from it. The in-app update check only follows stable releases, never betas.
 
 ---
 

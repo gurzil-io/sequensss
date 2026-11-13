@@ -5,9 +5,18 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Test builds (android/build-apk.sh --test): a separate app, "Sequensss Test", installed
-// next to the stable one, with its own version.
-val testBuild = (findProperty("sequensss.test") as String?) == "true"
+// Version: passed by android/build-apk.sh, otherwise read from the workspace Cargo.toml
+// (the single source). versionCode = major * 10000 + minor * 100 + patch.
+val cargoVersion: String by lazy {
+    Regex("""(?m)^version = "([^"]+)"""").find(rootProject.file("../Cargo.toml").readText())!!.groupValues[1]
+}
+val appVersion = (findProperty("sequensss.versionName") as String?) ?: cargoVersion
+val appVersionCode = (findProperty("sequensss.versionCode") as String?)?.toInt()
+    ?: appVersion.substringBefore('-').split('.').map { it.toInt() }.let { (a, b, c) -> a * 10000 + b * 100 + c }
+
+// Beta builds (android/build-apk.sh --beta): a separate app, "Sequensss Beta", installed
+// next to the stable one.
+val betaBuild = (findProperty("sequensss.beta") as String?) == "true"
 
 android {
     namespace = "com.sequensss.app"
@@ -17,14 +26,12 @@ android {
         applicationId = "com.sequensss.app"
         minSdk = 29          // AMidi (native MIDI) is available from API 29
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.1.4"
+        versionCode = appVersionCode
+        versionName = appVersion
         manifestPlaceholders["appName"] = "Sequensss"
-        if (testBuild) {
-            applicationIdSuffix = ".test"
-            manifestPlaceholders["appName"] = "Sequensss Test"
-            versionCode = (findProperty("sequensss.versionCode") as String).toInt()
-            versionName = findProperty("sequensss.versionName") as String
+        if (betaBuild) {
+            applicationIdSuffix = ".beta"
+            manifestPlaceholders["appName"] = "Sequensss Beta"
         }
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
