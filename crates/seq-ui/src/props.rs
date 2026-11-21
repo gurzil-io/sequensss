@@ -22,11 +22,17 @@ fn window<'a>(title: String, id: &str) -> egui::Window<'a> {
         .default_width(380.0)
 }
 
+/// Synth and arpeggiator windows: opened from the Settings dialog, so drawn above it
+/// (Foreground) and first shown in the middle of the screen.
+fn sound_window<'a>(ctx: &egui::Context, title: String, id: &str) -> egui::Window<'a> {
+    window(title, id).order(egui::Order::Foreground).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.screen_rect().center())
+}
+
 fn synth_window(st: &mut SeqUi, ctx: &egui::Context, project: &mut Project) {
     let Some(id) = st.synth_open else { return };
     let mut open = true;
     let name = project.channel(id).map(|c| c.name.clone()).unwrap_or_default();
-    window(trf!("SYNTHÉ · {}", "SYNTH · {}", name.to_uppercase()), "synth_win").open(&mut open).show(ctx, |ui| {
+    sound_window(ctx, trf!("SYNTHÉ · {}", "SYNTH · {}", name.to_uppercase()), "synth_win").open(&mut open).show(ctx, |ui| {
         let Some(ch) = project.channel_mut(id) else { return };
         if let ChannelKind::Synth(p) = &mut ch.kind {
             synth_params(ui, p);
@@ -43,7 +49,7 @@ fn arp_window(st: &mut SeqUi, ctx: &egui::Context, project: &mut Project) {
     let Some(id) = st.arp_open else { return };
     let mut open = true;
     let name = project.channel(id).map(|c| c.name.clone()).unwrap_or_default();
-    window(trf!("ARPÉGIATEUR · {}", "ARPEGGIATOR · {}", name.to_uppercase()), "arp_win").open(&mut open).show(ctx, |ui| {
+    sound_window(ctx, trf!("ARPÉGIATEUR · {}", "ARPEGGIATOR · {}", name.to_uppercase()), "arp_win").open(&mut open).show(ctx, |ui| {
         if let Some(ch) = project.channel_mut(id) {
             arp_params(ui, &mut ch.arp);
         }

@@ -710,7 +710,7 @@ fn panel_with(ui: &mut Ui, rect: Rect, title: &str, led_color: Color32, expandab
     let hrect = Rect::from_min_max(pos2(hx0, head.top()), pos2(exp_rect.left() - 8.0, head.bottom()));
     if hrect.width() > 10.0 {
         let mut child = ui.new_child(UiBuilder::new().max_rect(hrect).layout(Layout::left_to_right(Align::Center)));
-        child.set_clip_rect(hrect);
+        child.set_clip_rect(hrect.intersect(ui.clip_rect()));
         child.spacing_mut().item_spacing.x = 10.0;
         header(&mut child);
     }

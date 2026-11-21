@@ -137,6 +137,8 @@ const COMPACT_H: f32 = 600.0;
 /// Usable width of the full top bar; below it (tablet, narrow window),
 /// condensed bar above the grid.
 const FULL_BAR_W: f32 = 1880.0;
+/// Settings dialog: below this body height, the SOUND section scrolls.
+const SOUND_MIN_H: f32 = 300.0;
 
 /// Editor that receives edit commands (top bar, keyboard).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,11 +438,11 @@ impl SeqUi {
         if self.fullscreen() {
             self.floating_transport(ctx, info);
         }
+        self.settings_dialog(ctx, project, info);
         props::windows(self, ctx, project);
         self.browser_window(ctx);
         self.update_notice(ctx);
         self.toast(ctx);
-        self.settings_dialog(ctx, project, info);
         if theme::screen() {
             screen_overlay(ctx);
         }
@@ -503,7 +505,9 @@ impl SeqUi {
         // About the height of the old bottom panel row, so the sections keep their proportions.
         let size = vec2((screen.width() - 2.0 * margin).min(1200.0), (screen.height() - 2.0 * margin).min(560.0));
         let rect = Rect::from_center_size(screen.center(), size);
-        let area = egui::Area::new(egui::Id::new("settings_dialog")).order(egui::Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
+        // Not forced on top every frame: the synth and arpeggiator windows it opens
+        // (Foreground) must stay above it. Newly shown, it comes above the other windows.
+        egui::Area::new(egui::Id::new("settings_dialog")).order(egui::Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
             let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
             let p = ui.painter().clone();
             p.rect_filled(rect, 12.0, pal().bg);
@@ -535,22 +539,32 @@ impl SeqUi {
 
             let body = Rect::from_min_max(pos2(rect.left() + 12.0, head.bottom() + 10.0), rect.max - vec2(12.0, 12.0));
             let mut bu = ui.new_child(UiBuilder::new().max_rect(body));
-            match self.settings_tab {
-                SettingsTab::Sound => sound::show(self, &mut bu, body, project, info),
-                SettingsTab::Midi => midi_panel::show(self, &mut bu, body, project),
-                SettingsTab::General => self.general_settings(&mut bu, body),
+            // Small landscape phone: the sections scroll rather than overflow. MIDI & AUDIO
+            // keeps the full height, its columns scroll by themselves.
+            let tab = self.settings_tab;
+            if tab == SettingsTab::Midi {
+                midi_panel::show(self, &mut bu, body, project);
+                return;
             }
+            egui::ScrollArea::vertical().id_salt(("settings_body", tab as u8)).auto_shrink([false, false]).show(&mut bu, |ui| {
+                if tab == SettingsTab::Sound {
+                    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), body.height().max(SOUND_MIN_H)), Sense::hover());
+                    sound::show(self, ui, r, project, info);
+                } else {
+                    self.general_settings(ui);
+                }
+            });
         });
-        ctx.move_to_top(area.response.layer_id);
         if close {
             self.settings_open = false;
         }
     }
 
     /// "General" section: language, theme, update check.
-    fn general_settings(&mut self, ui: &mut egui::Ui, rect: Rect) {
-        let col = Rect::from_min_size(rect.min + vec2(8.0, 4.0), vec2(rect.width().min(460.0), rect.height()));
-        let mut cu = ui.new_child(UiBuilder::new().max_rect(col).layout(egui::Layout::top_down(egui::Align::Min)));
+    fn general_settings(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        let col = Rect::from_min_size(ui.cursor().min + vec2(8.0, 0.0), vec2((ui.available_width() - 8.0).min(460.0), 0.0));
+        let mut cu = ui.new_child(UiBuilder::new().max_rect(col.with_max_y(f32::INFINITY)).layout(egui::Layout::top_down(egui::Align::Min)));
         if let Some(l) = language_items(&mut cu) {
             self.act(UiAction::SetLanguage(l));
         }
@@ -562,6 +576,13 @@ impl SeqUi {
         if let Some(on) = update_toggle(&mut cu, self.check_updates) {
             self.act(UiAction::SetCheckUpdates(on));
         }
+        // Room taken in the scroll area.
+        ui.allocate_space(vec2(col.width(), cu.min_rect().height() + 4.0));
+    }
+
+    /// A modal dialog is open: the editors behind it get no edit commands.
+    fn modal_open(&self) -> bool {
+        self.settings_open
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -617,7 +638,11 @@ impl SeqUi {
         if save {
             self.act(UiAction::Save);
         }
-        if let Some(c) = cmds.into_iter().next() {
+        // Behind a modal, Delete / arrows / Escape… would edit what can't be seen
+        // (Escape closes the dialog itself).
+        if let Some(c) = cmds.into_iter().next()
+            && !self.modal_open()
+        {
             self.edit_cmd = Some((ed, c));
         }
     }
@@ -953,4 +978,28 @@ fn groove(ui: &mut egui::Ui) {
     let p = ui.painter();
     p.line_segment([pos2(r.center().x, r.top()), pos2(r.center().x, r.bottom())], Stroke::new(1.0_f32, pal().groove));
     p.line_segment([pos2(r.center().x + 1.0, r.top()), pos2(r.center().x + 1.0, r.bottom())], Stroke::new(1.0_f32, pal().bar_hl));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs one frame where `key` is pressed and returns the edit command it gave.
+    fn press(ui: &mut SeqUi, key: Key) -> Option<(Editor, EditCmd)> {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+        let _ = ctx.run(input, |ctx| ui.shortcuts(ctx));
+        ui.edit_cmd.take()
+    }
+
+    #[test]
+    fn no_edit_shortcuts_behind_the_settings_dialog() {
+        let mut ui = SeqUi::new(&Project::default());
+        assert_eq!(press(&mut ui, Key::Delete), Some((Editor::Piano, EditCmd::Delete)));
+        ui.settings_open = true;
+        for key in [Key::Delete, Key::Escape, Key::ArrowLeft] {
+            assert_eq!(press(&mut ui, key), None, "{key:?}");
+        }
+    }
 }
