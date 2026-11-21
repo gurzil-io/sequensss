@@ -47,6 +47,8 @@ enum Drag {
 
 /// Vertical drag (points) beyond which a keyboard press becomes a scroll.
 const KB_SCROLL_SLOP: f32 = 8.0;
+/// After a manual scroll or zoom, the view stops following the playhead for this long (s).
+const FOLLOW_PAUSE: f64 = 2.0;
 
 pub struct PianoState {
     scroll_x: f32,
@@ -71,6 +73,8 @@ pub struct PianoState {
     /// Note created by a tap on empty space, and when: the second tap of a double tap
     /// there must not delete it.
     fresh: Option<(usize, f64)>,
+    /// Time of the last manual scroll or zoom.
+    scrolled_at: f64,
 }
 
 impl Default for PianoState {
@@ -90,6 +94,7 @@ impl Default for PianoState {
             centered_for: None,
             grow_base: None,
             fresh: None,
+            scrolled_at: f64::NEG_INFINITY,
         }
     }
 }
@@ -217,11 +222,26 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         }
         ps.scroll_x -= dx;
         ps.scroll_y -= dy;
+        if dx != 0.0 || pointer.zoom != 1.0 {
+            ps.scrolled_at = pointer.time;
+        }
     }
     // Limited zoom-out: the pattern and the bar after it (at least 4 bars) fill the width.
     let fit = grid.width() / reach.max(4 * bar) as f32;
     ps.zoom = ps.zoom.max(fit);
     ps.scroll_y = ps.scroll_y.clamp(0.0, (128.0 * ps.key_h - grid.height()).max(0.0));
+    // Playhead inside the edited pattern (Song mode: only while one of its clips plays).
+    let playhead = info.playing.then(|| if st.song_mode { pattern_playhead(&project.arrangement, pat_id, pat_len, info.playhead) } else { Some(info.playhead) }).flatten();
+    // Follows the playhead bar by bar, unless the user just scrolled or is editing.
+    if let Some(ph) = playhead
+        && ps.drag.is_none()
+        && pointer.time - ps.scrolled_at > FOLLOW_PAUSE
+    {
+        let x = ph as f32 * ps.zoom - ps.scroll_x;
+        if x < 0.0 || x >= grid.width() {
+            ps.scroll_x = snap_floor(ph as Tick, bar) as f32 * ps.zoom;
+        }
+    }
     ps.scroll_x = ps.scroll_x.clamp(0.0, (reach as f32 * ps.zoom - grid.width()).max(0.0));
     // Notes can be placed anywhere in sight, and at least one bar past the end.
     let limit = reach.max((((ps.scroll_x + grid.width()) / ps.zoom) as Tick).div_ceil(bar) * bar);
@@ -620,11 +640,15 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         gp.rect_filled(r, 0.0, with_alpha(ORANGE, 30));
         gp.rect_stroke(r, 0.0, Stroke::new(1.0_f32, ORANGE));
     }
-    if info.playing && !st.song_mode {
-        let x = x_of(info.playhead);
-        if x >= grid.left() {
-            gp.rect_filled(Rect::from_center_size(pos2(x, grid.center().y), vec2(6.0, grid.height())), 0.0, with_alpha(LCD_GREEN, 30));
-            vline(&gp, x, grid.top(), grid.bottom(), LCD_GREEN, 2.0);
+    // Playhead, above the notes: a dark outline keeps it visible on any note color.
+    if let Some(ph) = playhead {
+        let x = x_of(ph);
+        if x >= grid.left() && x <= grid.right() {
+            gp.rect_filled(Rect::from_center_size(pos2(x, grid.center().y), vec2(10.0, grid.height())), 0.0, with_alpha(LCD_GREEN, 40));
+            vline(&gp, x, grid.top(), grid.bottom(), Color32::from_black_alpha(160), 5.0);
+            vline(&gp, x, grid.top(), grid.bottom(), LCD_GREEN, 2.5);
+            let top = grid.top();
+            gp.add(egui::Shape::convex_polygon(vec![pos2(x - 6.0, top), pos2(x + 6.0, top), pos2(x, top + 8.0)], LCD_GREEN, Stroke::new(1.0_f32, Color32::from_black_alpha(160))));
         }
     }
 
@@ -674,4 +698,64 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     }
 
     st.actions.extend(actions);
+}
+
+/// Playhead position inside `pattern` (length `pat_len`) for the song position `pos`:
+/// the clip of that pattern under the playhead, on any track, gives the offset, and the
+/// pattern loops when the clip is longer than it (as in the engine). If several clips of
+/// the pattern overlap, the one that started last wins. None when none is playing.
+pub(crate) fn pattern_playhead(arr: &Arrangement, pattern: PatternId, pat_len: Tick, pos: f64) -> Option<f64> {
+    let plen = pat_len.max(1) as f64;
+    arr.clips
+        .iter()
+        .filter(|c| c.pattern == pattern && c.len > 0 && pos >= c.start as f64 && pos < (c.start + c.len) as f64)
+        .max_by_key(|c| c.start)
+        .map(|c| (pos - c.start as f64) % plen)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(pattern: u32, track: u16, start: Tick, len: Tick) -> Clip {
+        Clip { pattern: PatternId(pattern), track, start, len }
+    }
+
+    #[test]
+    fn playhead_inside_clip() {
+        let arr = Arrangement { tracks: 4, clips: vec![clip(1, 0, 1000, 500), clip(2, 2, 0, 4000)] };
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 1200.0), Some(200.0));
+        assert_eq!(pattern_playhead(&arr, PatternId(2), 4000, 1200.0), Some(1200.0));
+    }
+
+    #[test]
+    fn playhead_none_outside_clips() {
+        let arr = Arrangement { tracks: 4, clips: vec![clip(1, 0, 1000, 500), clip(1, 1, 3000, 0)] };
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 999.0), None);
+        // The clip end is exclusive.
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 1500.0), None);
+        // Empty clips are ignored, like in the engine.
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 3000.0), None);
+        // Another pattern.
+        assert_eq!(pattern_playhead(&arr, PatternId(3), 500, 1200.0), None);
+    }
+
+    #[test]
+    fn playhead_loops_in_long_clip() {
+        let arr = Arrangement { tracks: 1, clips: vec![clip(1, 0, 1000, 2500)] };
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 1000.0), Some(0.0));
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 2250.0), Some(250.0));
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 3400.0), Some(400.0));
+        // A clip shorter than the pattern truncates it.
+        let arr = Arrangement { tracks: 1, clips: vec![clip(1, 0, 0, 300)] };
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 299.0), Some(299.0));
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 300.0), None);
+    }
+
+    #[test]
+    fn playhead_latest_overlapping_clip_wins() {
+        let arr = Arrangement { tracks: 2, clips: vec![clip(1, 1, 500, 2000), clip(1, 0, 0, 2000)] };
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 700.0), Some(200.0));
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 300.0), Some(300.0));
+    }
 }
