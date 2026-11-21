@@ -861,8 +861,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 /// the pattern overlap, the one that started last wins. None when none is playing.
 pub(crate) fn pattern_playhead(arr: &Arrangement, pattern: PatternId, pat_len: Tick, pos: f64) -> Option<f64> {
     let plen = pat_len.max(1) as f64;
-    arr.clips
-        .iter()
+    arr.audible_clips()
         .filter(|c| c.pattern == pattern && c.len > 0 && pos >= c.start as f64 && pos < (c.start + c.len) as f64)
         .max_by_key(|c| c.start)
         .map(|c| (pos - c.start as f64) % plen)
@@ -895,14 +894,14 @@ mod tests {
 
     #[test]
     fn playhead_inside_clip() {
-        let arr = Arrangement { tracks: 4, clips: vec![clip(1, 0, 1000, 500), clip(2, 2, 0, 4000)] };
+        let arr = Arrangement { tracks: 4, clips: vec![clip(1, 0, 1000, 500), clip(2, 2, 0, 4000)], muted: Vec::new() };
         assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 1200.0), Some(200.0));
         assert_eq!(pattern_playhead(&arr, PatternId(2), 4000, 1200.0), Some(1200.0));
     }
 
     #[test]
     fn playhead_none_outside_clips() {
-        let arr = Arrangement { tracks: 4, clips: vec![clip(1, 0, 1000, 500), clip(1, 1, 3000, 0)] };
+        let arr = Arrangement { tracks: 4, clips: vec![clip(1, 0, 1000, 500), clip(1, 1, 3000, 0)], muted: Vec::new() };
         assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 999.0), None);
         // The clip end is exclusive.
         assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 1500.0), None);
@@ -914,21 +913,24 @@ mod tests {
 
     #[test]
     fn playhead_loops_in_long_clip() {
-        let arr = Arrangement { tracks: 1, clips: vec![clip(1, 0, 1000, 2500)] };
+        let arr = Arrangement { tracks: 1, clips: vec![clip(1, 0, 1000, 2500)], muted: Vec::new() };
         assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 1000.0), Some(0.0));
         assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 2250.0), Some(250.0));
         assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 3400.0), Some(400.0));
         // A clip shorter than the pattern truncates it.
-        let arr = Arrangement { tracks: 1, clips: vec![clip(1, 0, 0, 300)] };
+        let arr = Arrangement { tracks: 1, clips: vec![clip(1, 0, 0, 300)], muted: Vec::new() };
         assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 299.0), Some(299.0));
         assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 300.0), None);
     }
 
     #[test]
     fn playhead_latest_overlapping_clip_wins() {
-        let arr = Arrangement { tracks: 2, clips: vec![clip(1, 1, 500, 2000), clip(1, 0, 0, 2000)] };
+        let mut arr = Arrangement { tracks: 2, clips: vec![clip(1, 1, 500, 2000), clip(1, 0, 0, 2000)], muted: Vec::new() };
         assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 700.0), Some(200.0));
         assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 300.0), Some(300.0));
+        // A muted track doesn't play, so the other clip gives the position.
+        arr.set_muted(1, true);
+        assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 700.0), Some(700.0));
     }
 }
 
