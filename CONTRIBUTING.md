@@ -48,11 +48,12 @@ Add tests for new logic and for every bug you fix: the engine, `seq-edit` and `s
 
 ## How issues move
 
-Issues are tracked on the [project board](https://github.com/orgs/gurzil-io/projects/1): **Backlog → Todo → In progress → To test → Done**.
+Issues are tracked on the [project board](https://github.com/orgs/gurzil-io/projects/1): **Backlog → Todo → In progress → To test → To release → Done**.
 
 1. Work on an issue moves it to **In progress**. Commits reference it with `Refs #N`. Don't use `Closes #N` or `Fixes #N`, which would close the issue before anyone tested it.
 2. When the change is ready, the issue moves to **To test** and the **beta** is updated (see below). A comment on the issue says what to check.
-3. The tester tries it in the beta. If it works, they close the issue and it moves to **Done**. If not, they comment and it goes back to **In progress**.
+3. The tester tries it in the beta. If it works, they close the issue and it moves to **To release**. If not, they comment and it goes back to **In progress**.
+4. When the next stable version ships, the issues in **To release** move to **Done**.
 
 ## Versions
 
