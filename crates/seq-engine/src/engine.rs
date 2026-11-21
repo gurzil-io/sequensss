@@ -25,7 +25,9 @@
 //!   → Stop. No clock while stopped.
 //!
 //! Recording (Pattern mode): playback does not loop, it goes on past the end of the
-//! pattern (the app grows the pattern).
+//! pattern (the app grows the pattern). With the count-in on, Play from stop first clicks
+//! one bar while the transport stays put; playback, recording and the MIDI clock Start
+//! begin right after it.
 
 use crate::MAX_BLOCK;
 use crate::arp::ArpState;
@@ -35,7 +37,7 @@ use crate::instrument::Instrument;
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use seq_model::*;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::Thread;
 use std::time::Instant;
 
@@ -70,6 +72,8 @@ pub enum EngineCmd {
     SetLiveChannel(Option<ChannelId>),
     SetRecording(bool),
     SetMetronome(bool),
+    /// One bar of clicks before playback when Play starts from stop with recording on.
+    SetCountIn(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -116,6 +120,7 @@ pub struct Shared {
     playing: AtomicBool,
     /// Pattern played (Pattern mode), `u64::MAX` in Song mode.
     pattern: AtomicU64,
+    count_in: AtomicU32,
 }
 
 impl Shared {
@@ -124,6 +129,11 @@ impl Shared {
     }
     pub fn playing(&self) -> bool {
         self.playing.load(Ordering::Relaxed)
+    }
+    /// During the count-in, the beats left including the one sounding (4, 3, 2, 1 in 4/4);
+    /// otherwise 0.
+    pub fn count_in(&self) -> u32 {
+        self.count_in.load(Ordering::Relaxed)
     }
     /// Pattern the playhead is in (Pattern mode), as of the last callback: a mode change
     /// shows up together with the playhead it moved.
@@ -188,6 +198,32 @@ struct Active {
 }
 
 const METRO: u16 = u16::MAX;
+
+/// Count-in in progress: a click on every beat of one bar, the transport not moving yet.
+#[derive(Clone, Copy)]
+struct CountIn {
+    beats: u32,
+    /// Beat length, in ticks.
+    beat: f64,
+    /// Ticks counted before the last rebase (tempo change).
+    done: f64,
+    /// Frames since the last rebase.
+    frames: u64,
+    /// Next beat to click.
+    next: u32,
+}
+
+impl CountIn {
+    fn elapsed(&self, spt: f64) -> f64 {
+        self.done + self.frames as f64 / spt
+    }
+
+    /// Frames left before playback starts.
+    fn frames_left(&self, spt: f64) -> u64 {
+        let end = ((self.beats as f64 * self.beat - self.done) * spt).ceil().max(0.0) as u64;
+        end.saturating_sub(self.frames)
+    }
+}
 
 /// MIDI clock: 24 pulses per quarter note.
 const CLOCK_TICKS: f64 = (PPQ / 24) as f64;
@@ -291,6 +327,10 @@ pub struct Engine {
     click: Click,
     live_channel: Option<ChannelId>,
     recording: bool,
+    count_in_on: bool,
+    count_in: Option<CountIn>,
+    /// Stopped (not paused): the next Play may count in.
+    stopped: bool,
     level_frames: usize,
     master_peak: (f32, f32),
 
@@ -322,6 +362,7 @@ impl Engine {
             playhead_bits: AtomicU64::new(0f64.to_bits()),
             playing: AtomicBool::new(false),
             pattern: AtomicU64::new(u64::MAX),
+            count_in: AtomicU32::new(0),
         });
         let sr = sample_rate.max(1) as f64;
         let engine = Engine {
@@ -352,6 +393,9 @@ impl Engine {
             click: Click::new(sr as f32),
             live_channel: None,
             recording: false,
+            count_in_on: false,
+            count_in: None,
+            stopped: true,
             level_frames: 0,
             master_peak: (0.0, 0.0),
             latency: 0.0,
@@ -409,7 +453,11 @@ impl Engine {
         let total = out.len() / channels;
         let mut done = 0;
         while done < total {
-            let n = (total - done).min(MAX_BLOCK);
+            let mut n = (total - done).min(MAX_BLOCK);
+            // A block ends where the count-in does: playback starts with the next one.
+            if let Some(left) = self.count_in.map(|c| c.frames_left(self.spt)).filter(|&l| l > 0) {
+                n = n.min(left as usize);
+            }
             self.cb_frame = done;
             self.render_block(n);
             for i in 0..n {
@@ -425,12 +473,23 @@ impl Engine {
                 }
             }
             done += n;
+            if self.count_in.is_some_and(|c| c.frames_left(self.spt) == 0) {
+                // Playback starts on the next frame (MIDI messages stamped from there).
+                self.cb_frame = done;
+                self.count_in = None;
+                self.start_playing();
+            }
         }
         for x in out[total * channels..].iter_mut() {
             *x = 0.0;
         }
         self.shared.playhead_bits.store(self.position().to_bits(), Ordering::Relaxed);
         self.shared.playing.store(self.playing, Ordering::Relaxed);
+        let beats_left = self.count_in.map_or(0, |c| {
+            let beat = (c.elapsed(self.spt) / c.beat).floor().max(0.0) as u32;
+            c.beats.saturating_sub(beat).max(1)
+        });
+        self.shared.count_in.store(beats_left, Ordering::Relaxed);
         let pattern = match self.mode {
             PlayMode::Pattern(id) => id.0 as u64,
             PlayMode::Song => u64::MAX,
@@ -447,15 +506,22 @@ impl Engine {
     pub fn handle_cmd(&mut self, cmd: EngineCmd) {
         match cmd {
             EngineCmd::Play => {
-                if !self.playing {
+                if !self.playing && self.count_in.is_none() {
                     self.normalize_origin();
-                    self.playing = true;
-                    self.frames = 0;
-                    self.clock_restart();
+                    let bar = self.graph.as_ref().map(|g| (g.beats_per_bar.max(1), g.beat_len.max(1) as f64));
+                    match bar {
+                        Some((beats, beat)) if self.count_in_on && self.recording && self.stopped => {
+                            self.count_in = Some(CountIn { beats, beat, done: 0.0, frames: 0, next: 0 });
+                        }
+                        _ => self.start_playing(),
+                    }
                 }
             }
             EngineCmd::Pause => {
+                // During the count-in: cancelled, still stopped.
+                self.count_in = None;
                 if self.playing {
+                    self.stopped = false;
                     let pos = self.position();
                     self.kill_seq_notes();
                     self.flush_all_arps();
@@ -466,6 +532,8 @@ impl Engine {
                 }
             }
             EngineCmd::Stop => {
+                self.count_in = None;
+                self.stopped = true;
                 self.kill_seq_notes();
                 self.flush_all_arps();
                 if self.playing {
@@ -588,6 +656,7 @@ impl Engine {
                 }
             }
             EngineCmd::SetMetronome(m) => self.metronome = m,
+            EngineCmd::SetCountIn(c) => self.count_in_on = c,
         }
     }
 
@@ -621,6 +690,12 @@ impl Engine {
         !self.one_shot && !self.extending()
     }
 
+    fn start_playing(&mut self) {
+        self.playing = true;
+        self.frames = 0;
+        self.clock_restart();
+    }
+
     fn region_start(&self) -> f64 {
         self.region().map(|r| r.0).unwrap_or(0.0)
     }
@@ -652,6 +727,10 @@ impl Engine {
 
     /// Moves the origin to the current position (before a tempo/region change).
     fn rebase(&mut self) {
+        if let Some(c) = self.count_in.as_mut() {
+            c.done += c.frames as f64 / self.spt;
+            c.frames = 0;
+        }
         if !self.playing {
             return;
         }
@@ -1101,6 +1180,7 @@ impl Engine {
 
     fn render_block(&mut self, n: usize) {
         self.pending.clear();
+        self.gather_count_in(n);
         if self.playing {
             // First: at equal frames, clock and transport go out before the notes.
             self.clock_block(n);
@@ -1112,11 +1192,12 @@ impl Engine {
         while cur < n {
             if self.playing {
                 self.fire_offs(cur);
-                while pi < self.pending.len() && self.pending[pi].offset <= cur {
-                    let p = self.pending[pi];
-                    self.fire_on(p, cur);
-                    pi += 1;
-                }
+            }
+            // The song's notes while playing, the count-in clicks before.
+            while pi < self.pending.len() && self.pending[pi].offset <= cur {
+                let p = self.pending[pi];
+                self.fire_on(p, cur);
+                pi += 1;
             }
             // After the note-ons: a chord played at the same instant is complete on the 1st step.
             self.fire_arps(cur);
@@ -1138,6 +1219,23 @@ impl Engine {
         self.clock += n as u64;
         if self.playing {
             self.frames += n as u64;
+        }
+        if let Some(c) = self.count_in.as_mut() {
+            c.frames += n as u64;
+        }
+    }
+
+    /// Count-in clicks within block `[0, n)` (blocks never go past the count-in).
+    fn gather_count_in(&mut self, n: usize) {
+        let Some(c) = self.count_in.as_mut() else { return };
+        while c.next < c.beats && self.pending.len() < self.pending.capacity() {
+            let f = ((c.next as f64 * c.beat - c.done) * self.spt).ceil() as i64 - c.frames as i64;
+            if f >= n as i64 {
+                break;
+            }
+            let accent = c.next == 0;
+            self.pending.push(Pending { offset: f.max(0) as usize, chan: METRO, key: accent as u8, vel: 0, end: 0.0 });
+            c.next += 1;
         }
     }
 
@@ -1971,6 +2069,151 @@ mod tests {
         assert_eq!(recorded(&mut h), vec![(ch, 60, 100, 4800.0, true)]);
     }
 
+    // ------------------------------------------------------------------
+    // Count-in (48 kHz, 120 BPM: a beat is 24000 frames)
+    // ------------------------------------------------------------------
+
+    /// Probe engine with a MIDI input, recording and count-in on, stopped.
+    fn count_in_engine(steps: &[usize]) -> (Engine, EngineHandle, Log, Producer<MidiInMsg>, ChannelId) {
+        let (p, ch, _) = project_with_steps(steps, 16);
+        let (mut e, h, log, tx) = midi_in_engine(&p, ch);
+        e.handle_cmd(EngineCmd::SetLiveChannel(Some(ch)));
+        e.handle_cmd(EngineCmd::SetRecording(true));
+        e.handle_cmd(EngineCmd::SetCountIn(true));
+        (e, h, log, tx, ch)
+    }
+
+    #[test]
+    fn count_in_clicks_one_bar_then_plays() {
+        for block in [512, 333, 1, 7000] {
+            let (mut e, _h, log, _tx, _) = count_in_engine(&[0, 4]);
+            e.handle_cmd(EngineCmd::Play);
+            let mut left = Vec::new();
+            let mut shown = Vec::new();
+            for _ in 0..3 {
+                left.extend(render_left(&mut e, 24_000, block));
+                shown.push(e.shared.count_in());
+                assert!(!e.shared.playing());
+                assert_eq!(e.shared.playhead(), 0.0);
+            }
+            // After each beat: the next one.
+            assert_eq!(shown, vec![3, 2, 1]);
+            left.extend(render_left(&mut e, 24_000, block));
+            assert!(e.shared.playing());
+            assert_eq!(e.shared.count_in(), 0);
+            left.extend(render_left(&mut e, 30_000, block));
+            // Metronome off: only the count-in clicks.
+            assert_eq!(onsets(&left, 0), vec![0, 24_000, 48_000, 72_000], "block {block}");
+            // The first note right after the count-in, the next one a beat later.
+            assert_eq!(ons(&log), vec![96_000, 120_000], "block {block}");
+        }
+    }
+
+    #[test]
+    fn count_in_first_beat_is_accented_and_shown() {
+        let (mut e, _h, _log, _tx, _) = count_in_engine(&[]);
+        e.handle_cmd(EngineCmd::Play);
+        let first = render_left(&mut e, 100, 100);
+        assert_eq!(e.shared.count_in(), 4);
+        render_left(&mut e, 24_000 - 100, 512);
+        let second = render_left(&mut e, 100, 100);
+        let peak = |v: &[f32]| v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(peak(&second) > 0.0);
+        assert!(peak(&first) > peak(&second) * 1.2);
+    }
+
+    #[test]
+    fn count_in_follows_time_signature() {
+        let (mut p, ch, _) = project_with_steps(&[0], 16);
+        p.time_sig = (3, 4);
+        let (mut e, log) = stopped_probe_engine(&p, ch);
+        e.handle_cmd(EngineCmd::SetRecording(true));
+        e.handle_cmd(EngineCmd::SetCountIn(true));
+        e.handle_cmd(EngineCmd::Play);
+        let left = render_left(&mut e, 80_000, 512);
+        assert_eq!(onsets(&left, 0), vec![0, 24_000, 48_000]);
+        assert_eq!(ons(&log), vec![72_000]);
+    }
+
+    #[test]
+    fn no_count_in_when_off_not_recording_or_resuming() {
+        // Count-in off.
+        let (mut e, _h, log, _tx, _) = count_in_engine(&[0]);
+        e.handle_cmd(EngineCmd::SetCountIn(false));
+        e.handle_cmd(EngineCmd::Play);
+        run(&mut e, 1000, &[500]);
+        assert_eq!(ons(&log), vec![0]);
+        // Recording off.
+        let (mut e, _h, log, _tx, _) = count_in_engine(&[0]);
+        e.handle_cmd(EngineCmd::SetRecording(false));
+        e.handle_cmd(EngineCmd::Play);
+        run(&mut e, 1000, &[500]);
+        assert_eq!(ons(&log), vec![0]);
+        // Resume after a pause: right away.
+        let (mut e, _h, log, _tx, _) = count_in_engine(&[2]);
+        e.handle_cmd(EngineCmd::Play);
+        run(&mut e, 97_000, &[500]);
+        e.handle_cmd(EngineCmd::Pause);
+        run(&mut e, 1000, &[500]);
+        e.handle_cmd(EngineCmd::Play);
+        run(&mut e, 12_000, &[500]);
+        // Step 2 is 12000 frames into the pattern; paused 1000 frames in.
+        assert_eq!(ons(&log), vec![98_000 + 11_000]);
+    }
+
+    #[test]
+    fn no_recorded_events_during_count_in() {
+        let (mut e, mut h, _log, mut tx, ch) = count_in_engine(&[]);
+        e.handle_cmd(EngineCmd::Play);
+        run(&mut e, 50_000, &[500]);
+        tx.push(midi(true, 60, 100)).unwrap();
+        run(&mut e, 45_500, &[500]);
+        tx.push(midi(false, 60, 0)).unwrap();
+        run(&mut e, 500, &[500]);
+        // Heard (live) but not recorded.
+        assert!(recorded(&mut h).is_empty());
+        // Played right after the count-in: at the start of the pattern.
+        tx.push(midi(true, 62, 100)).unwrap();
+        run(&mut e, 500, &[500]);
+        assert_eq!(recorded(&mut h), vec![(ch, 62, 100, 0.0, true)]);
+    }
+
+    #[test]
+    fn stop_or_pause_during_count_in_cancels_it() {
+        for pause in [false, true] {
+            let (mut e, _h, log, _tx, _) = count_in_engine(&[0]);
+            e.handle_cmd(EngineCmd::Play);
+            let mut left = render_left(&mut e, 30_000, 512);
+            e.handle_cmd(if pause { EngineCmd::Pause } else { EngineCmd::Stop });
+            left.extend(render_left(&mut e, 100_000, 512));
+            assert_eq!(onsets(&left, 0), vec![0, 24_000]);
+            assert!(ons(&log).is_empty());
+            assert!(!e.shared.playing());
+            assert_eq!(e.shared.count_in(), 0);
+            assert_eq!(e.shared.playhead(), 0.0);
+            // Play again: a new count-in.
+            e.handle_cmd(EngineCmd::Play);
+            let left = render_left(&mut e, 100_000, 512);
+            assert_eq!(onsets(&left, 130_000), vec![130_000, 154_000, 178_000, 202_000]);
+            assert_eq!(ons(&log), vec![226_000]);
+        }
+    }
+
+    #[test]
+    fn count_in_survives_tempo_change() {
+        let (mut p, ch, _) = project_with_steps(&[0], 16);
+        let (mut e, log) = stopped_probe_engine(&p, ch);
+        e.handle_cmd(EngineCmd::SetRecording(true));
+        e.handle_cmd(EngineCmd::SetCountIn(true));
+        e.handle_cmd(EngineCmd::Play);
+        // 1.5 beats at 120 BPM, then 60 BPM (48000 frames a beat).
+        let mut left = render_left(&mut e, 36_000, 500);
+        p.tempo_bpm = 60.0;
+        e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(&p))));
+        left.extend(render_left(&mut e, 121_000, 500));
+        assert_eq!(onsets(&left, 0), vec![0, 24_000, 60_000, 108_000]);
+        assert_eq!(ons(&log), vec![156_000]);
+    }
 
     #[test]
     fn recorded_note_placed_when_played() {
@@ -2413,6 +2656,30 @@ mod tests {
         e.handle_cmd(EngineCmd::Play);
         r.go(&mut e, &mut rx, 10, &[512]);
         assert_eq!(r.take(), vec![(33_000, 0, FA), (33_000, 0, F8)]);
+    }
+
+    #[test]
+    fn clock_starts_after_count_in() {
+        for blocks in [&[512usize][..], &[333], &[100, 1000, 7]] {
+            let p = clock_project(1, &[0], 120.0);
+            let (mut e, mut rx) = clock_engine(&p, 48_000, PlayMode::Pattern(p.patterns[0].id));
+            e.handle_cmd(EngineCmd::SetRecording(true));
+            e.handle_cmd(EngineCmd::SetCountIn(true));
+            e.handle_cmd(EngineCmd::Play);
+            let mut r = Run::new();
+            r.go(&mut e, &mut rx, 98_500, blocks);
+            // Nothing during the count-in (one bar = 96000 frames), then Start and the pulses.
+            assert_eq!(r.take(), vec![(96_000, 0, FA), (96_000, 0, F8), (97_000, 0, F8), (98_000, 0, F8)], "blocks {blocks:?}");
+            // Stop during a new count-in: no message at all.
+            e.handle_cmd(EngineCmd::Stop);
+            r.go(&mut e, &mut rx, 500, blocks);
+            assert_eq!(r.take().iter().map(|m| m.2).collect::<Vec<_>>(), vec![FC]);
+            e.handle_cmd(EngineCmd::Play);
+            r.go(&mut e, &mut rx, 50_000, blocks);
+            e.handle_cmd(EngineCmd::Stop);
+            r.go(&mut e, &mut rx, 100_000, blocks);
+            assert!(r.take().is_empty());
+        }
     }
 
     #[test]

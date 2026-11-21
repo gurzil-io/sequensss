@@ -7,7 +7,7 @@ use crate::icons::{self, Icon};
 use crate::skin::{self, Kind};
 use crate::theme::*;
 use crate::{EditCmd, PanelId, PlaybackInfo, SeqUi, UiAction};
-use eframe::egui::{self, Rect, Sense, Stroke, UiBuilder, pos2, vec2};
+use eframe::egui::{self, Align2, Rect, Sense, Stroke, UiBuilder, pos2, vec2};
 use seq_i18n::{tr, trf};
 use seq_model::*;
 
@@ -39,8 +39,12 @@ impl SeqUi {
             self.act(UiAction::Stop);
         }
         let rec = self.recording;
+        let count_in = info.count_in;
         if skin::button(ui, vec2(52.0, H), Kind::Cream, rec, |p, r, _| {
-            if rec {
+            // Count-in: the beats left (the position display may not fit).
+            if count_in > 0 {
+                p.text(r.center(), Align2::CENTER_CENTER, count_in.to_string(), lcd(30.0), REC_RED);
+            } else if rec {
                 skin::led(p, r.center(), 8.0, REC_RED, true);
             } else {
                 icons::draw(p, r, 18.0, Icon::Record, REC_RED, 1.0);
@@ -90,7 +94,7 @@ impl SeqUi {
             let b = (t / bar).floor();
             let be = ((t - b * bar) / beat).floor();
             let pos = format!("{:03}:{}:{:03}", b as u64 + 1, be as u64 + 1, (t - b * bar - be * beat) as u64);
-            skin::lcd(ui, vec2(180.0, H), "POSITION", &pos, LCD_GREEN, lcd(32.0), Sense::hover());
+            crate::position_lcd(ui, vec2(180.0, H), &pos, info.count_in, lcd(32.0));
         }
 
         // Edit, right-aligned

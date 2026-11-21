@@ -85,6 +85,15 @@ fn language_items(ui: &mut egui::Ui) -> Option<seq_i18n::Lang> {
     chosen
 }
 
+/// Position display; during the count-in, the beats left instead.
+fn position_lcd(ui: &mut egui::Ui, size: egui::Vec2, pos: &str, count_in: u32, font: egui::FontId) {
+    if count_in > 0 {
+        skin::lcd(ui, size, tr!("DÉCOMPTE", "COUNT-IN"), &format!("- {count_in} -"), REC_RED, font, Sense::hover());
+    } else {
+        skin::lcd(ui, size, "POSITION", pos, LCD_GREEN, font, Sense::hover());
+    }
+}
+
 /// "Check for updates" switch of the menus; returns the new value when clicked.
 fn update_toggle(ui: &mut egui::Ui, on: bool) -> Option<bool> {
     skin::menu_toggle(ui, tr!("Rechercher les mises à jour", "Check for updates"), on).clicked().then_some(!on)
@@ -131,6 +140,8 @@ pub enum EditCmd {
 pub struct PlaybackInfo {
     pub playing: bool,
     pub playhead: f64,
+    /// Count-in: beats left (4, 3, 2, 1 in 4/4), 0 when not counting in.
+    pub count_in: u32,
     pub levels: HashMap<ChannelId, (f32, f32)>,
     pub master: (f32, f32),
 }
@@ -156,6 +167,8 @@ pub struct SeqUi {
     pub metronome: bool,
     pub recording: bool,
     pub quantize: bool,
+    /// One bar of clicks before recording starts.
+    pub count_in: bool,
     pub status: String,
     pub file_label: String,
     pub dirty: bool,
@@ -208,6 +221,7 @@ impl SeqUi {
             metronome: false,
             recording: false,
             quantize: true,
+            count_in: true,
             status: String::new(),
             file_label: tr!("Sans titre", "Untitled").into(),
             dirty: false,
@@ -252,6 +266,7 @@ impl SeqUi {
         let status = std::mem::take(&mut self.status);
         let update = self.update.take();
         let (focus, tab, check_updates) = (self.focus, self.tab, self.check_updates);
+        let (quantize, count_in) = (self.quantize, self.count_in);
         let clipboard = std::mem::take(&mut self.channel_clipboard);
         *self = SeqUi::new(project);
         self.channel_clipboard = clipboard;
@@ -259,6 +274,8 @@ impl SeqUi {
         self.status = status;
         self.update = update;
         self.check_updates = check_updates;
+        self.quantize = quantize;
+        self.count_in = count_in;
         self.focus = focus;
         self.tab = tab;
     }
@@ -603,7 +620,7 @@ impl SeqUi {
         let be = ((t - b * bar) / beat).floor();
         let tk = t - b * bar - be * beat;
         let pos = format!("{:03}:{}:{:03}", b as u64 + 1, be as u64 + 1, tk as u64);
-        skin::lcd(ui, vec2(196.0, 56.0), "POSITION", &pos, LCD_GREEN, lcd(40.0), Sense::hover());
+        position_lcd(ui, vec2(196.0, 56.0), &pos, info.count_in, lcd(40.0));
 
         // BPM
         ui.spacing_mut().item_spacing.x = 3.0;

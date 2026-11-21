@@ -1,4 +1,4 @@
-//! MIDI & Audio: audio output, MIDI input, project MIDI outputs, quantize.
+//! MIDI & Audio: audio output, MIDI input, project MIDI outputs, recording settings.
 
 use crate::skin::{self, Kind};
 use crate::theme::*;
@@ -100,6 +100,17 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) {
         skin::pill_switch(&mut su, &mut st.quantize, vec2(64.0, 34.0), None).on_hover_text(tr!(
             "Arrondit les notes enregistrées à la grille du piano roll (SNAP)",
             "Rounds the recorded notes to the piano roll grid (SNAP)"
+        ));
+        ui.add_space(6.0);
+        let (r, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(r, 7.0, INNER2);
+        p.rect_stroke(r, 7.0, egui::Stroke::new(1.0_f32, EDGE));
+        p.with_clip_rect(r).text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, tr!("Décompte (1 mesure)", "Count-in (1 bar)"), body(15.0), TEXT);
+        let mut su = ui.new_child(UiBuilder::new().max_rect(Rect::from_center_size(pos2(r.right() - 38.0, r.center().y), vec2(64.0, 34.0))));
+        skin::pill_switch(&mut su, &mut st.count_in, vec2(64.0, 34.0), None).on_hover_text(tr!(
+            "Avec l'enregistrement armé, Lecture depuis l'arrêt joue une mesure de clics avant de démarrer",
+            "With recording armed, Play from stop clicks one bar before starting"
         ));
     });
 

@@ -63,6 +63,7 @@ struct App {
     sent_loop: Option<Option<(Tick, Tick)>>,
     sent_metronome: Option<bool>,
     sent_recording: Option<bool>,
+    sent_count_in: Option<bool>,
     sent_live: Option<Option<ChannelId>>,
 
     midi_in: Option<MidiInConn>,
@@ -122,6 +123,7 @@ impl App {
             sent_loop: None,
             sent_metronome: None,
             sent_recording: None,
+            sent_count_in: None,
             sent_live: None,
             midi_in: None,
             midi_in_tx: Arc::new(Mutex::new(RingBuffer::<MidiInMsg>::new(1).0)),
@@ -204,6 +206,7 @@ impl App {
         self.sent_loop = None;
         self.sent_metronome = None;
         self.sent_recording = None;
+        self.sent_count_in = None;
         self.sent_live = None;
 
         let d = &mut self.ui.devices;
@@ -296,6 +299,10 @@ impl App {
         if self.sent_metronome != Some(self.ui.metronome) {
             h.send(EngineCmd::SetMetronome(self.ui.metronome));
             self.sent_metronome = Some(self.ui.metronome);
+        }
+        if self.sent_count_in != Some(self.ui.count_in) {
+            h.send(EngineCmd::SetCountIn(self.ui.count_in));
+            self.sent_count_in = Some(self.ui.count_in);
         }
         if self.sent_recording != Some(self.ui.recording) {
             h.send(EngineCmd::SetRecording(self.ui.recording));
@@ -642,7 +649,7 @@ impl App {
     fn handle_action(&mut self, ctx: &egui::Context, a: UiAction) {
         match a {
             UiAction::TogglePlay => {
-                let playing = self.handle.as_ref().is_some_and(|h| h.shared.playing());
+                let playing = self.handle.as_ref().is_some_and(|h| h.shared.playing() || h.shared.count_in() > 0);
                 self.send(if playing { EngineCmd::Pause } else { EngineCmd::Play });
                 if self.handle.is_none() {
                     self.ui.status = tr!("Pas de sortie audio — voir Réglages", "No audio output — see Settings").into();
@@ -779,19 +786,21 @@ impl eframe::App for App {
         #[cfg(target_os = "android")]
         self.poll_platform();
 
-        let (playing, playhead, pattern) = match &self.handle {
+        let (playing, playhead, pattern, count_in) = match &self.handle {
             Some(h) => {
                 let pattern = h.shared.pattern();
-                (h.shared.playing(), h.shared.playhead(), pattern)
+                (h.shared.playing(), h.shared.playhead(), pattern, h.shared.count_in())
             }
-            None => (false, 0.0, None),
+            None => (false, 0.0, None, 0),
         };
+        // The count-in shows as playing (Play pauses, i.e. cancels it).
+        let running = playing || count_in > 0;
         // Recording past the end of the pattern: it grows bar by bar as the playhead goes
         // (up to the bar holding the stop position).
         if self.recording_take(playing) && pattern == Some(self.ui.pattern) {
             seq_edit::grow_to_position(&mut self.project, self.ui.pattern, playhead);
         }
-        let info = PlaybackInfo { playing, playhead, levels: self.levels.clone(), master: self.master };
+        let info = PlaybackInfo { playing: running, playhead, count_in, levels: self.levels.clone(), master: self.master };
         self.ui.loading = self.loader.loading().collect();
         self.ui.can_undo = self.history.can_undo() || self.project != self.saved;
         self.ui.can_redo = self.history.can_redo();
@@ -807,7 +816,7 @@ impl eframe::App for App {
         // a recording take is committed when playback stops.
         let gesture = ctx.input(|i| i.pointer.any_down() || i.any_touches())
             || ctx.wants_keyboard_input()
-            || self.recording_take(playing);
+            || self.recording_take(running);
         self.history.commit_if_changed(&self.project, gesture);
         self.sync_engine();
         self.poll_samples();
@@ -818,7 +827,7 @@ impl eframe::App for App {
             self.title = title;
         }
 
-        if playing {
+        if running {
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(Duration::from_millis(80));
