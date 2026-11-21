@@ -3,13 +3,16 @@
 //!
 //! Brush: press on a note then drag = end-to-end copies of that note; on empty
 //! space = notes of the last used length. Pitch follows the finger.
+//!
+//! Touch: two fingers scroll and zoom; with notes selected, three fingers change their
+//! length (two hold, the third slides left or right).
 
 use crate::skin::{self, Kind};
 use crate::theme::*;
 use crate::widgets::{Pointer, hline, vline};
 use crate::{EditCmd, Editor, PanelId, PlaybackInfo, SeqUi, UiAction};
 use crate::icons::Icon;
-use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
+use eframe::egui::{self, Align2, Color32, Event, Pos2, Rect, Sense, Stroke, TouchId, TouchPhase, Ui, pos2, vec2};
 use seq_edit::{snap_floor, snap_round};
 use seq_i18n::{tr, trf};
 use seq_model::*;
@@ -17,6 +20,10 @@ use seq_model::*;
 const KB_W: f32 = 72.0;
 const VEL_H: f32 = 56.0;
 const EDGE_PX: f32 = 8.0;
+/// Touch: the resize handle reaches this far inside a note (at most 40% of its width)...
+const EDGE_TOUCH_IN: f32 = 22.0;
+/// ...and this far past its right edge, over empty space.
+const EDGE_TOUCH_OUT: f32 = 12.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -75,6 +82,57 @@ pub struct PianoState {
     fresh: Option<(usize, f64)>,
     /// Time of the last manual scroll or zoom.
     scrolled_at: f64,
+    /// Selection and note count when the current press began: restored if the press
+    /// becomes a two-finger gesture (so the selection survives the start of a three-finger one).
+    press_sel: Option<(Vec<usize>, usize)>,
+    fingers: Fingers,
+    /// Three fingers came down on the piano roll since all fingers were last up: no scroll,
+    /// zoom or editing until they are all lifted.
+    three: bool,
+    /// Three-finger length change in progress: initial state of the selected notes.
+    stretch: Option<Vec<(usize, Note)>>,
+}
+
+/// Touches currently down, tracked one by one (egui's `multi_touch` only gives aggregates):
+/// id, position at the start of the gesture, current position.
+#[derive(Default)]
+struct Fingers(Vec<(TouchId, Pos2, Pos2)>);
+
+impl Fingers {
+    fn apply(&mut self, id: TouchId, phase: TouchPhase, pos: Pos2) {
+        let i = self.0.iter().position(|f| f.0 == id);
+        match (phase, i) {
+            (TouchPhase::Start, Some(i)) => self.0[i] = (id, pos, pos),
+            (TouchPhase::Start, None) => self.0.push((id, pos, pos)),
+            (TouchPhase::Move, Some(i)) => self.0[i].2 = pos,
+            // A move for a touch whose start was missed (panel hidden): tracked from here.
+            (TouchPhase::Move, None) => self.0.push((id, pos, pos)),
+            (TouchPhase::End | TouchPhase::Cancel, Some(i)) => {
+                self.0.remove(i);
+            }
+            (TouchPhase::End | TouchPhase::Cancel, None) => {}
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Movements are measured from now on.
+    fn rebase(&mut self) {
+        for f in &mut self.0 {
+            f.1 = f.2;
+        }
+    }
+
+    fn all_in(&self, r: Rect) -> bool {
+        self.0.iter().all(|f| r.contains(f.2))
+    }
+
+    /// Horizontal movement of the finger that moved the most sideways (the others hold).
+    fn moving_dx(&self) -> f32 {
+        self.0.iter().map(|f| f.2.x - f.1.x).fold(0.0, |a, d| if d.abs() > a.abs() { d } else { a })
+    }
 }
 
 impl Default for PianoState {
@@ -95,6 +153,19 @@ impl Default for PianoState {
             grow_base: None,
             fresh: None,
             scrolled_at: f64::NEG_INFINITY,
+            press_sel: None,
+            fingers: Fingers::default(),
+            three: false,
+            stretch: None,
+        }
+    }
+}
+
+/// Puts back the notes saved at the start of a gesture.
+fn restore(notes: &mut [Note], orig: &[(usize, Note)]) {
+    for &(i, n) in orig {
+        if let Some(m) = notes.get_mut(i) {
+            *m = n;
         }
     }
 }
@@ -202,12 +273,37 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     // Room after the end of the pattern: one bar, where notes can be placed (the pattern grows).
     let reach = (base_len + bar).max(pat_len);
 
+    // --- Individual touches (three-finger gesture) ---
+    let (touch_events, any_touches) = ui.input(|i| {
+        let ev: Vec<(TouchId, TouchPhase, Pos2)> = i
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Touch { id, phase, pos, .. } => Some((*id, *phase, *pos)),
+                _ => None,
+            })
+            .collect();
+        (ev, i.any_touches())
+    });
+    for (id, phase, pos) in touch_events {
+        ps.fingers.apply(id, phase, pos);
+    }
+    if !any_touches {
+        ps.fingers = Fingers::default();
+        ps.three = false;
+    }
+    let three_start = !ps.three && ps.fingers.count() >= 3 && ps.fingers.all_in(area);
+    if three_start {
+        ps.three = true;
+        ps.fingers.rebase();
+    }
+
     // --- Scroll / zoom ---
     if ps.centered_for != Some(ch) {
         ps.centered_for = Some(ch);
         ps.scroll_y = (127.0 - default_key as f32) * ps.key_h - grid.height() / 2.0;
     }
-    if resp.hovered() || pointer.multi {
+    if (resp.hovered() || pointer.multi) && !ps.three {
         if pointer.zoom != 1.0 {
             let anchor_tick = pointer.pos.map(|p| (p.x - grid.left() + ps.scroll_x) / ps.zoom).unwrap_or(0.0);
             ps.zoom = (ps.zoom * pointer.zoom).clamp(0.01, 2.0);
@@ -323,13 +419,16 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         && let Some(drag) = ps.drag.take()
     {
         match drag {
-            Drag::Move { anchor, key, fresh, .. } => {
+            Drag::Move { anchor, key, fresh, orig, .. } => {
                 actions.push(UiAction::Preview { channel: ch, key, vel: 0, on: false });
                 if fresh && anchor < notes.len() {
                     notes.remove(anchor);
                     ps.selected.clear();
+                } else {
+                    restore(&mut notes, &orig);
                 }
             }
+            Drag::Resize { orig, .. } => restore(&mut notes, &orig),
             Drag::Keyboard { key, .. } => actions.push(UiAction::Preview { channel: ch, key, vel: 0, on: false }),
             Drag::Paint { brush, before, .. } => {
                 actions.push(UiAction::Preview { channel: ch, key: brush.key, vel: 0, on: false });
@@ -338,14 +437,58 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             }
             _ => {}
         }
+        if let Some((sel, n)) = ps.press_sel.take()
+            && n == notes.len()
+        {
+            ps.selected = sel;
+        }
+    }
+
+    // --- Three fingers: the moving one changes the length of the selected notes ---
+    if three_start && !ps.selected.is_empty() {
+        ps.stretch = Some(ps.selected.iter().filter_map(|&i| notes.get(i).map(|n| (i, *n))).collect());
+    }
+    if let Some(orig) = &ps.stretch {
+        if ps.fingers.count() >= 3 {
+            let base: Vec<Note> = orig.iter().map(|(_, n)| *n).collect();
+            let lens = stretch_lengths(&base, ps.fingers.moving_dx(), ps.zoom, snap, limit);
+            for (&(i, _), len) in orig.iter().zip(lens) {
+                if let Some(m) = notes.get_mut(i) {
+                    m.len = len;
+                }
+            }
+        } else {
+            // A finger lifted: the lengths stay as they are.
+            if let Some(n) = orig.first().and_then(|&(i, _)| notes.get(i)) {
+                ps.last_len = n.len;
+            }
+            ps.stretch = None;
+        }
     }
 
     // --- Mouse: press ---
     let tool = ps.tool;
     let hit = |notes: &[Note], pos: Pos2| notes.iter().rposition(|n| note_rect(n).expand2(vec2(0.0, 1.5)).contains(pos));
     let snapshot_of = |notes: &[Note], sel: &[usize]| -> Vec<(usize, Note)> { sel.iter().filter_map(|&i| notes.get(i).map(|n| (i, *n))).collect() };
-    if let Some(pos) = pointer.pos.filter(|_| resp.hovered()) {
+    // Note whose right-edge handle is under `pos` (`h` = note under `pos`). On touch the
+    // handle is wider than it looks, and reaches a little past the end of the note.
+    let edge_of = |notes: &[Note], h: Option<usize>, pos: Pos2| -> Option<usize> {
+        match h {
+            Some(i) => {
+                let r = note_rect(&notes[i]);
+                let inside = if any_touches { (r.width() * 0.4).clamp(EDGE_PX, EDGE_TOUCH_IN) } else { EDGE_PX };
+                (pos.x >= r.right() - inside).then_some(i)
+            }
+            None if any_touches => notes.iter().rposition(|n| {
+                let r = note_rect(n);
+                (r.top()..=r.bottom()).contains(&pos.y) && pos.x >= r.right() && pos.x <= r.right() + EDGE_TOUCH_OUT
+            }),
+            None => None,
+        }
+    };
+    if let Some(pos) = pointer.pos.filter(|_| resp.hovered() && !ps.three) {
         if pointer.primary_pressed {
+            ps.press_sel = Some((ps.selected.clone(), notes.len()));
             if kb.contains(pos) {
                 let key = key_of(pos.y);
                 actions.push(UiAction::Preview { channel: ch, key, vel: 100, on: true });
@@ -354,7 +497,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 ps.drag = Some(Drag::Velocity);
             } else if grid.contains(pos) {
                 let t = tick_of(pos.x);
-                match (tool, hit(&notes, pos)) {
+                let h = hit(&notes, pos);
+                let edge = edge_of(&notes, h, pos);
+                match (tool, h) {
                     (Tool::Erase, _) => ps.drag = Some(Drag::Erase),
                     // Brush: copies the touched note, otherwise places a note of the last used length.
                     (Tool::Paint, h) if !pointer.shift && !pointer.command => {
@@ -389,12 +534,21 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                         }
                         let n = notes[idx];
                         let orig = snapshot_of(&notes, &ps.selected);
-                        if pos.x >= note_rect(&n).right() - EDGE_PX {
+                        if edge == Some(idx) {
                             ps.drag = Some(Drag::Resize { anchor: idx, orig });
                         } else {
                             ps.drag = Some(Drag::Move { anchor: idx, grab: t as i64 - n.start as i64, key: n.key, orig, fresh: false });
                             actions.push(UiAction::Preview { channel: ch, key: n.key, vel: n.velocity, on: true });
                         }
+                    }
+                    // Touch, just past the end of a note: its resize handle.
+                    (_, None) if !pointer.shift && !pointer.command && edge.is_some() => {
+                        let idx = edge.unwrap_or_default();
+                        if !ps.selected.contains(&idx) {
+                            ps.selected = vec![idx];
+                        }
+                        let orig = snapshot_of(&notes, &ps.selected);
+                        ps.drag = Some(Drag::Resize { anchor: idx, orig });
                     }
                     // Select tool, or Ctrl/Shift + drag: rectangle.
                     (Tool::Select, None) | (Tool::Draw, None) if tool == Tool::Select || pointer.command || pointer.shift => {
@@ -425,6 +579,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 
     // --- Double tap on a note: delete it (quick delete on touch, no tool change) ---
     if pointer.double_clicked
+        && !ps.three
         && tool != Tool::Erase
         && !pointer.shift
         && !pointer.command
@@ -569,7 +724,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         p.length = new_len;
     }
     let pat_len = new_len;
-    ps.grow_base = ps.drag.is_some().then_some((pat_id, base_len));
+    ps.grow_base = (ps.drag.is_some() || ps.stretch.is_some()).then_some((pat_id, base_len));
     if baked {
         if let Some(c) = project.channel_mut(ch) {
             c.arp.enabled = false;
@@ -713,6 +868,23 @@ pub(crate) fn pattern_playhead(arr: &Arrangement, pattern: PatternId, pat_len: T
         .map(|c| (pos - c.start as f64) % plen)
 }
 
+/// Lengths of `notes` after a three-finger slide of `dx_px` points at `zoom` points per tick:
+/// the change is a whole number of `snap` units, applied to every note, which keeps at
+/// least a minimal length and doesn't grow past `limit` (one already past it isn't cut).
+pub(crate) fn stretch_lengths(notes: &[Note], dx_px: f32, zoom: f32, snap: Tick, limit: Tick) -> Vec<Tick> {
+    let snap = snap.max(1);
+    let min_len = snap.clamp(1, STEP / 4);
+    let steps = (dx_px / zoom.max(f32::EPSILON) / snap as f32).round() as i64;
+    let delta = steps.saturating_mul(snap as i64);
+    notes
+        .iter()
+        .map(|n| {
+            let len = (n.len as i64).saturating_add(delta).max(min_len as i64) as Tick;
+            if delta > 0 { len.min(limit.saturating_sub(n.start).max(n.len)) } else { len }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,5 +929,71 @@ mod tests {
         let arr = Arrangement { tracks: 2, clips: vec![clip(1, 1, 500, 2000), clip(1, 0, 0, 2000)] };
         assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 700.0), Some(200.0));
         assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 300.0), Some(300.0));
+    }
+}
+
+#[cfg(test)]
+mod stretch_tests {
+    use super::*;
+
+    fn note(start: Tick, len: Tick) -> Note {
+        Note { start, len, key: 60, velocity: 100 }
+    }
+
+    #[test]
+    fn slide_snaps_to_the_grid() {
+        let notes = [note(0, STEP), note(STEP, 2 * STEP)];
+        // zoom 0.1: one step (240 ticks) = 24 points.
+        assert_eq!(stretch_lengths(&notes, 0.0, 0.1, STEP, 10_000), vec![STEP, 2 * STEP]);
+        assert_eq!(stretch_lengths(&notes, 11.0, 0.1, STEP, 10_000), vec![STEP, 2 * STEP]);
+        assert_eq!(stretch_lengths(&notes, 13.0, 0.1, STEP, 10_000), vec![2 * STEP, 3 * STEP]);
+        assert_eq!(stretch_lengths(&notes, 50.0, 0.1, STEP, 10_000), vec![3 * STEP, 4 * STEP]);
+        assert_eq!(stretch_lengths(&notes, -24.0, 0.1, STEP, 10_000)[1], STEP);
+    }
+
+    #[test]
+    fn off_grid_lengths_keep_their_offset() {
+        let notes = [note(0, STEP + 7)];
+        assert_eq!(stretch_lengths(&notes, 24.0, 0.1, STEP, 10_000), vec![2 * STEP + 7]);
+        // Free snap: tick precision.
+        assert_eq!(stretch_lengths(&notes, 1.0, 0.1, 1, 10_000), vec![STEP + 17]);
+    }
+
+    #[test]
+    fn minimal_length() {
+        let notes = [note(0, STEP), note(0, 4 * STEP)];
+        assert_eq!(stretch_lengths(&notes, -240.0, 0.1, STEP, 10_000), vec![STEP / 4, STEP / 4]);
+        // Free snap: down to one tick.
+        assert_eq!(stretch_lengths(&notes, -1000.0, 0.1, 1, 10_000), vec![1, 1]);
+    }
+
+    #[test]
+    fn growth_stops_at_the_limit() {
+        let notes = [note(0, STEP), note(3 * STEP, STEP), note(10 * STEP, STEP)];
+        let limit = 4 * STEP;
+        assert_eq!(stretch_lengths(&notes, 1000.0, 0.1, STEP, limit), vec![4 * STEP, STEP, STEP]);
+        // Shrinking a note already past the limit still works.
+        assert_eq!(stretch_lengths(&[note(10 * STEP, 2 * STEP)], -24.0, 0.1, STEP, limit), vec![STEP]);
+    }
+
+    #[test]
+    fn fingers_track_the_moving_one() {
+        let mut f = Fingers::default();
+        f.apply(TouchId(1), TouchPhase::Start, pos2(10.0, 10.0));
+        f.apply(TouchId(2), TouchPhase::Start, pos2(30.0, 10.0));
+        f.apply(TouchId(3), TouchPhase::Start, pos2(300.0, 10.0));
+        assert_eq!(f.count(), 3);
+        f.apply(TouchId(1), TouchPhase::Move, pos2(12.0, 11.0));
+        f.apply(TouchId(3), TouchPhase::Move, pos2(260.0, 30.0));
+        assert_eq!(f.moving_dx(), -40.0);
+        f.rebase();
+        assert_eq!(f.moving_dx(), 0.0);
+        f.apply(TouchId(3), TouchPhase::Move, pos2(290.0, 30.0));
+        assert_eq!(f.moving_dx(), 30.0);
+        f.apply(TouchId(2), TouchPhase::End, pos2(30.0, 10.0));
+        f.apply(TouchId(9), TouchPhase::Cancel, pos2(0.0, 0.0));
+        assert_eq!(f.count(), 2);
+        assert!(f.all_in(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 100.0))));
+        assert!(!f.all_in(Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0))));
     }
 }

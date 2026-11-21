@@ -790,7 +790,8 @@ impl eframe::App for App {
         }
         self.confirm_dialog(ctx);
 
-        let gesture = ctx.input(|i| i.pointer.any_down()) || ctx.wants_keyboard_input();
+        // Touch: the gesture lasts while any finger is down, not only the one egui maps to the pointer.
+        let gesture = ctx.input(|i| i.pointer.any_down() || i.any_touches()) || ctx.wants_keyboard_input();
         self.history.commit_if_changed(&self.project, gesture);
         self.sync_engine();
         self.poll_samples();
