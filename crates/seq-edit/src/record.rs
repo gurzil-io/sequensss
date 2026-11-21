@@ -1,4 +1,8 @@
 //! Live recording: MIDI in note-on/off events → pattern notes.
+//!
+//! While recording, the engine does not loop the pattern: notes played past its end land
+//! there and the pattern grows by whole bars (like FL Studio). The app does not commit an
+//! undo step during the take, so the notes and the growth undo together.
 
 use seq_model::*;
 use std::collections::HashMap;
@@ -10,9 +14,9 @@ pub struct Recorder {
     pending: HashMap<(ChannelId, u8), (f64, f64, u8)>,
 }
 
-/// A note-on matched with its note-off. `start` is the position within the pattern, as
-/// sent by the engine (it wraps at the end of the loop); `len` is how long the key was
-/// held, in ticks (it does not wrap).
+/// A note-on matched with its note-off. `start` is the position in the pattern, as sent
+/// by the engine (past the end of the pattern if it was played there); `len` is how long
+/// the key was held, in ticks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecordedNote {
     pub channel: ChannelId,
@@ -28,7 +32,7 @@ impl Recorder {
         self.pending.clear();
     }
 
-    /// `tick`: position within the pattern; `time`: monotonic time in ticks.
+    /// `tick`: position in the pattern; `time`: monotonic time in ticks.
     /// Note-on: remembered. If the same key was already held, the engine cut that note,
     /// so it is returned, ending here. Note-off: returns the matching note-on, or `None`.
     pub fn event(&mut self, channel: ChannelId, key: u8, vel: u8, tick: f64, time: f64, on: bool) -> Option<RecordedNote> {
@@ -43,22 +47,40 @@ impl Recorder {
 }
 
 impl RecordedNote {
-    /// The note to add to a pattern of length `pattern_len`. `grid`: quantization in ticks
-    /// (0 or 1 = off), start and length rounded to it (at least one grid unit). The length
-    /// is kept within `STEP / 4..=pattern_len` (or the whole pattern if it is shorter than
-    /// `STEP / 4`).
-    pub fn to_note(&self, pattern_len: Tick, grid: Tick) -> Note {
-        let plen = pattern_len.max(1);
-        let raw_start = self.start.max(0.0) as Tick % plen;
+    /// The note, where it was played (it may start past the end of the pattern: see
+    /// [`add_recorded_note`]). `grid`: quantization in ticks (0 or 1 = off), start and
+    /// length rounded to it (at least one grid unit). It lasts at least `STEP / 4`.
+    pub fn to_note(&self, grid: Tick) -> Note {
+        let mut start = self.start.max(0.0) as Tick;
         let mut len = self.len.max(0.0) as Tick;
-        let mut s = raw_start;
         if grid > 1 {
-            s = crate::snap_round(raw_start, grid) % plen;
+            start = crate::snap_round(start, grid);
             len = crate::snap_round(len, grid).max(grid);
         }
-        len = len.clamp((STEP / 4).min(plen), plen);
-        Note { start: s, len, key: self.key, velocity: self.vel.max(1) }
+        Note { start, len: len.max(STEP / 4), key: self.key, velocity: self.vel.max(1) }
     }
+}
+
+/// Adds a recorded note to the pattern, which grows by whole bars to hold it.
+pub fn add_recorded_note(project: &mut Project, pattern: PatternId, channel: ChannelId, note: Note) {
+    let bar = project.bar_len();
+    let Some(pat) = project.pattern_mut(pattern) else { return };
+    pat.length = crate::length_for_end(pat.length, note.start + note.len, bar);
+    pat.notes.entry(channel).or_default().push(note);
+}
+
+/// Recording went on past the end of the pattern, up to position `pos` (ticks): the
+/// pattern grows to the end of the bar holding it. Returns `true` if it grew.
+pub fn grow_to_position(project: &mut Project, pattern: PatternId, pos: f64) -> bool {
+    let bar = project.bar_len();
+    let Some(len) = project.pattern(pattern).map(|p| p.length) else { return false };
+    // Also false for NaN.
+    if !(pos > len as f64 && pos.is_finite()) {
+        return false;
+    }
+    let new = crate::length_for_end(len, pos.ceil() as Tick, bar);
+    project.pattern_mut(pattern).unwrap().length = new;
+    new > len
 }
 
 #[cfg(test)]
@@ -72,10 +94,10 @@ mod tests {
     const OFF: Tick = 0;
 
     /// Note-on at position `start`, released `held` ticks later, then converted.
-    fn rec(start: f64, held: f64, len: Tick, grid: Tick) -> Note {
+    fn rec(start: f64, held: f64, grid: Tick) -> Note {
         let mut r = Recorder::default();
         assert_eq!(r.event(A, 60, 100, start, 1000.0, true), None);
-        r.event(A, 60, 0, 0.0, 1000.0 + held, false).unwrap().to_note(len, grid)
+        r.event(A, 60, 0, 0.0, 1000.0 + held, false).unwrap().to_note(grid)
     }
 
     fn note(start: Tick, len: Tick) -> Note {
@@ -84,9 +106,9 @@ mod tests {
 
     #[test]
     fn simple_note() {
-        assert_eq!(rec(480.0, 960.0, BAR, OFF), note(480, 960));
+        assert_eq!(rec(480.0, 960.0, OFF), note(480, 960));
         // Sub-tick positions are truncated.
-        assert_eq!(rec(480.9, 960.0, BAR, OFF), note(480, 960));
+        assert_eq!(rec(480.9, 960.0, OFF), note(480, 960));
     }
 
     #[test]
@@ -101,34 +123,29 @@ mod tests {
     }
 
     #[test]
-    fn note_crossing_loop_end_keeps_its_length() {
-        // Starts 1 step before the end, released 2 steps after the loop restarted.
-        assert_eq!(rec((BAR - STEP) as f64, (3 * STEP) as f64, BAR, OFF), note(BAR - STEP, 3 * STEP));
-        // Released exactly at the loop start.
-        assert_eq!(rec((BAR - STEP) as f64, STEP as f64, BAR, OFF), note(BAR - STEP, STEP));
+    fn notes_past_the_pattern_end_are_not_wrapped() {
+        // Played in bar 2 of a one-bar pattern, held for two bars.
+        assert_eq!(rec((BAR + 480) as f64, (2 * BAR) as f64, OFF), note(BAR + 480, 2 * BAR));
+        // Quantized past the end: stays there.
+        assert_eq!(rec((BAR - 10) as f64, 210.0, STEP), note(BAR, STEP));
     }
 
     #[test]
     fn quantize_rounds_start_and_length() {
         // Start 100 → 0 (rounded down), length 300 → 240.
-        assert_eq!(rec(100.0, 300.0, BAR, STEP), note(0, STEP));
+        assert_eq!(rec(100.0, 300.0, STEP), note(0, STEP));
         // Start 130 → 240 (rounded up), length 400 → 480.
-        assert_eq!(rec(130.0, 400.0, BAR, STEP), note(STEP, 2 * STEP));
+        assert_eq!(rec(130.0, 400.0, STEP), note(STEP, 2 * STEP));
         // Halfway rounds up.
-        assert_eq!(rec(120.0, 480.0, BAR, STEP), note(STEP, 2 * STEP));
+        assert_eq!(rec(120.0, 480.0, STEP), note(STEP, 2 * STEP));
         // Without quantize, nothing moves.
-        assert_eq!(rec(130.0, 400.0, BAR, OFF), note(130, 400));
-    }
-
-    #[test]
-    fn quantize_start_rounded_past_the_end_wraps_to_zero() {
-        assert_eq!(rec((BAR - 10) as f64, 210.0, BAR, STEP), note(0, STEP));
+        assert_eq!(rec(130.0, 400.0, OFF), note(130, 400));
     }
 
     #[test]
     fn quantize_length_is_at_least_one_step() {
-        assert_eq!(rec(0.0, 10.0, BAR, STEP), note(0, STEP));
-        assert_eq!(rec(0.0, 0.0, BAR, STEP), note(0, STEP));
+        assert_eq!(rec(0.0, 10.0, STEP), note(0, STEP));
+        assert_eq!(rec(0.0, 0.0, STEP), note(0, STEP));
     }
 
     #[test]
@@ -150,42 +167,14 @@ mod tests {
             (1, note(1100, 700)),
         ];
         for (grid, expected) in cases {
-            assert_eq!(rec(1100.0, 700.0, BAR, grid), expected, "grid {grid}");
+            assert_eq!(rec(1100.0, 700.0, grid), expected, "grid {grid}");
         }
-        // Rounded up past the end: wraps to the start of the pattern.
-        assert_eq!(rec((BAR - 400) as f64, 100.0, BAR, PPQ as Tick), note(0, PPQ as Tick));
     }
 
     #[test]
     fn short_note_clamped_to_quarter_step() {
-        assert_eq!(rec(500.0, 10.0, BAR, OFF), note(500, STEP / 4));
-        assert_eq!(rec(500.0, 0.0, BAR, OFF), note(500, STEP / 4));
-    }
-
-    #[test]
-    fn length_clamped_to_pattern() {
-        // Quantized length rounded up past a pattern that is not a multiple of the step.
-        let plen = 2 * STEP + 200;
-        assert_eq!(rec(0.0, (2 * STEP + 199) as f64, plen, STEP), note(0, plen));
-        // A note held for almost a whole loop.
-        assert_eq!(rec(0.0, (BAR - 1) as f64, BAR, OFF), note(0, BAR - 1));
-    }
-
-    #[test]
-    fn note_held_longer_than_pattern_is_clamped() {
-        // Held for 1.5 loops: the whole pattern.
-        assert_eq!(rec(0.0, (BAR + BAR / 2) as f64, BAR, OFF), note(0, BAR));
-        // Held for exactly 2 loops.
-        assert_eq!(rec(0.0, (2 * BAR) as f64, BAR, OFF), note(0, BAR));
-    }
-
-    #[test]
-    fn tiny_pattern_does_not_panic() {
-        // Pattern lengths are not validated when a project file is loaded.
-        assert_eq!(rec(0.0, 10.0, 30, OFF), note(0, 30));
-        assert_eq!(rec(0.0, 10.0, 30, STEP), note(0, 30));
-        // Length 0 is treated as 1 tick.
-        assert_eq!(rec(0.0, 10.0, 0, OFF), note(0, 1));
+        assert_eq!(rec(500.0, 10.0, OFF), note(500, STEP / 4));
+        assert_eq!(rec(500.0, 0.0, OFF), note(500, STEP / 4));
     }
 
     #[test]
@@ -214,7 +203,7 @@ mod tests {
         let mut r = Recorder::default();
         let mut notes = Vec::new();
         for (tick, vel, on) in [(0.0, 80, true), (480.0, 110, true), (960.0, 0, false)] {
-            notes.extend(r.event(A, 60, vel, tick, tick, on).map(|n| n.to_note(BAR, OFF)));
+            notes.extend(r.event(A, 60, vel, tick, tick, on).map(|n| n.to_note(OFF)));
         }
         let n = |start, len, velocity| Note { start, len, key: 60, velocity };
         assert_eq!(notes, vec![n(0, 480, 80), n(480, 480, 110)]);
@@ -225,20 +214,18 @@ mod tests {
     fn velocity_zero_becomes_one() {
         let mut r = Recorder::default();
         r.event(A, 60, 0, 0.0, 0.0, true);
-        assert_eq!(r.event(A, 60, 0, 480.0, 480.0, false).unwrap().to_note(BAR, OFF).velocity, 1);
+        assert_eq!(r.event(A, 60, 0, 480.0, 480.0, false).unwrap().to_note(OFF).velocity, 1);
     }
 
     #[test]
     fn out_of_range_values() {
         // Negative position → 0.
-        assert_eq!(rec(-50.0, 480.0, BAR, OFF), note(0, 480));
+        assert_eq!(rec(-50.0, 480.0, OFF), note(0, 480));
         // NaN → 0 (f64::max ignores NaN).
-        assert_eq!(rec(f64::NAN, 480.0, BAR, OFF), note(0, 480));
-        // Beyond the pattern → modulo.
-        assert_eq!(rec((BAR + 480) as f64, 480.0, BAR, OFF), note(480, 480));
+        assert_eq!(rec(f64::NAN, 480.0, OFF), note(0, 480));
         // A negative or NaN duration → the shortest note.
-        assert_eq!(rec(100.0, -1.0, BAR, OFF), note(100, STEP / 4));
-        assert_eq!(rec(100.0, f64::NAN, BAR, OFF), note(100, STEP / 4));
+        assert_eq!(rec(100.0, -1.0, OFF), note(100, STEP / 4));
+        assert_eq!(rec(100.0, f64::NAN, OFF), note(100, STEP / 4));
     }
 
     #[test]
@@ -250,8 +237,73 @@ mod tests {
         let b = r.event(B, 60, 0, 720.0, 720.0, false).unwrap();
         let a64 = r.event(A, 64, 0, 960.0, 960.0, false).unwrap();
         let a60 = r.event(A, 60, 0, 1200.0, 1200.0, false).unwrap();
-        assert_eq!((b.channel, b.key, b.to_note(BAR, OFF)), (B, 60, Note { start: 240, len: 480, key: 60, velocity: 90 }));
-        assert_eq!((a64.channel, a64.to_note(BAR, OFF)), (A, Note { start: 480, len: 480, key: 64, velocity: 80 }));
-        assert_eq!((a60.channel, a60.to_note(BAR, OFF)), (A, Note { start: 0, len: 1200, key: 60, velocity: 100 }));
+        assert_eq!((b.channel, b.key, b.to_note(OFF)), (B, 60, Note { start: 240, len: 480, key: 60, velocity: 90 }));
+        assert_eq!((a64.channel, a64.to_note(OFF)), (A, Note { start: 480, len: 480, key: 64, velocity: 80 }));
+        assert_eq!((a60.channel, a60.to_note(OFF)), (A, Note { start: 0, len: 1200, key: 60, velocity: 100 }));
+    }
+
+    /// Project with a 4-bar pattern and a channel.
+    fn four_bars() -> (Project, PatternId, ChannelId) {
+        let mut p = Project::empty();
+        let ch = p.add_channel("c", ChannelKind::Synth(SynthParams::default())).unwrap();
+        let pat = p.patterns[0].id;
+        p.pattern_mut(pat).unwrap().length = 4 * BAR;
+        (p, pat, ch)
+    }
+
+    #[test]
+    fn recorded_note_grows_the_pattern_by_whole_bars() {
+        let (mut p, pat, ch) = four_bars();
+        // Inside: no change.
+        add_recorded_note(&mut p, pat, ch, note(BAR, STEP));
+        assert_eq!(p.pattern(pat).unwrap().length, 4 * BAR);
+        // Ending exactly at the end: no change.
+        add_recorded_note(&mut p, pat, ch, note(4 * BAR - STEP, STEP));
+        assert_eq!(p.pattern(pat).unwrap().length, 4 * BAR);
+        // Held across the end: to the end of bar 5.
+        add_recorded_note(&mut p, pat, ch, note(4 * BAR - STEP, 2 * STEP));
+        assert_eq!(p.pattern(pat).unwrap().length, 5 * BAR);
+        // Played in bar 7.
+        add_recorded_note(&mut p, pat, ch, note(6 * BAR + 480, STEP));
+        let pt = p.pattern(pat).unwrap();
+        assert_eq!(pt.length, 7 * BAR);
+        assert_eq!(pt.notes[&ch].len(), 4);
+        assert_eq!(pt.notes[&ch][3], note(6 * BAR + 480, STEP));
+    }
+
+    #[test]
+    fn stop_grows_the_pattern_to_the_bar_of_the_position() {
+        let (mut p, pat, _) = four_bars();
+        // Stopped before the end: no change.
+        assert!(!grow_to_position(&mut p, pat, (3 * BAR) as f64 + 0.5));
+        assert!(!grow_to_position(&mut p, pat, (4 * BAR) as f64));
+        assert!(!grow_to_position(&mut p, pat, f64::NAN));
+        assert!(!grow_to_position(&mut p, pat, f64::INFINITY));
+        assert_eq!(p.pattern(pat).unwrap().length, 4 * BAR);
+        // Stopped in bar 6: 6 bars.
+        assert!(grow_to_position(&mut p, pat, (5 * BAR + 1000) as f64 + 0.25));
+        assert_eq!(p.pattern(pat).unwrap().length, 6 * BAR);
+        // Just past the end of bar 6: 7 bars.
+        assert!(grow_to_position(&mut p, pat, (6 * BAR) as f64 + 0.1));
+        assert_eq!(p.pattern(pat).unwrap().length, 7 * BAR);
+        // Unknown pattern.
+        assert!(!grow_to_position(&mut p, PatternId(999), (9 * BAR) as f64));
+    }
+
+    #[test]
+    fn take_is_one_undo_step() {
+        // The app holds the commit during the take: the notes and the growth undo together.
+        let (mut p, pat, ch) = four_bars();
+        let mut h = crate::History::new(&p, 100);
+        add_recorded_note(&mut p, pat, ch, note(BAR, STEP));
+        assert!(!h.commit_if_changed(&p, true));
+        add_recorded_note(&mut p, pat, ch, note(4 * BAR + 100, STEP));
+        grow_to_position(&mut p, pat, (5 * BAR + 10) as f64);
+        assert!(h.commit_if_changed(&p, false));
+        assert_eq!(p.pattern(pat).unwrap().length, 6 * BAR);
+        assert!(h.undo(&mut p));
+        let pt = p.pattern(pat).unwrap();
+        assert_eq!(pt.length, 4 * BAR);
+        assert!(pt.notes.get(&ch).is_none_or(|n| n.is_empty()));
     }
 }

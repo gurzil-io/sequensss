@@ -11,7 +11,7 @@ use std::collections::{HashSet, VecDeque};
 
 mod record;
 mod sync;
-pub use record::{RecordedNote, Recorder};
+pub use record::{RecordedNote, Recorder, add_recorded_note, grow_to_position};
 pub use sync::{SlotUpdate, exports_song, slot_updates};
 
 /// Default memory budget of the undo history (estimated).

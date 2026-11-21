@@ -407,9 +407,14 @@ impl App {
             return;
         }
         let Some(rec) = self.recorder.event(channel, key, vel, tick, time, on) else { return };
-        let grid = self.ui.record_grid();
-        let Some(pat) = self.project.pattern_mut(self.ui.pattern) else { return };
-        pat.notes.entry(rec.channel).or_default().push(rec.to_note(pat.length, grid));
+        let note = rec.to_note(self.ui.record_grid());
+        seq_edit::add_recorded_note(&mut self.project, self.ui.pattern, rec.channel, note);
+    }
+
+    /// Recording into the current pattern (Pattern mode): the engine does not loop, and the
+    /// whole take is one undo step.
+    fn recording_take(&self, playing: bool) -> bool {
+        playing && self.ui.recording && !self.ui.song_mode
     }
 
     // ------------------------------------------------------------------
@@ -774,10 +779,18 @@ impl eframe::App for App {
         #[cfg(target_os = "android")]
         self.poll_platform();
 
-        let (playing, playhead) = match &self.handle {
-            Some(h) => (h.shared.playing(), h.shared.playhead()),
-            None => (false, 0.0),
+        let (playing, playhead, pattern) = match &self.handle {
+            Some(h) => {
+                let pattern = h.shared.pattern();
+                (h.shared.playing(), h.shared.playhead(), pattern)
+            }
+            None => (false, 0.0, None),
         };
+        // Recording past the end of the pattern: it grows bar by bar as the playhead goes
+        // (up to the bar holding the stop position).
+        if self.recording_take(playing) && pattern == Some(self.ui.pattern) {
+            seq_edit::grow_to_position(&mut self.project, self.ui.pattern, playhead);
+        }
         let info = PlaybackInfo { playing, playhead, levels: self.levels.clone(), master: self.master };
         self.ui.loading = self.loader.loading().collect();
         self.ui.can_undo = self.history.can_undo() || self.project != self.saved;
@@ -790,8 +803,11 @@ impl eframe::App for App {
         }
         self.confirm_dialog(ctx);
 
-        // Touch: the gesture lasts while any finger is down, not only the one egui maps to the pointer.
-        let gesture = ctx.input(|i| i.pointer.any_down() || i.any_touches()) || ctx.wants_keyboard_input();
+        // A gesture lasts while any finger is down (not only the one egui maps to the pointer);
+        // a recording take is committed when playback stops.
+        let gesture = ctx.input(|i| i.pointer.any_down() || i.any_touches())
+            || ctx.wants_keyboard_input()
+            || self.recording_take(playing);
         self.history.commit_if_changed(&self.project, gesture);
         self.sync_engine();
         self.poll_samples();

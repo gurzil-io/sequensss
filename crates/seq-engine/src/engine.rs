@@ -23,6 +23,9 @@
 //!   ignore it); not in Pattern mode, where gear usually loops its own patterns.
 //! - Clock enabled on an output while playing → SPP + Continue on that output; disabled
 //!   → Stop. No clock while stopped.
+//!
+//! Recording (Pattern mode): playback does not loop, it goes on past the end of the
+//! pattern (the app grows the pattern).
 
 use crate::MAX_BLOCK;
 use crate::arp::ArpState;
@@ -111,6 +114,8 @@ pub struct MidiOutMsg {
 pub struct Shared {
     playhead_bits: AtomicU64,
     playing: AtomicBool,
+    /// Pattern played (Pattern mode), `u64::MAX` in Song mode.
+    pattern: AtomicU64,
 }
 
 impl Shared {
@@ -119,6 +124,12 @@ impl Shared {
     }
     pub fn playing(&self) -> bool {
         self.playing.load(Ordering::Relaxed)
+    }
+    /// Pattern the playhead is in (Pattern mode), as of the last callback: a mode change
+    /// shows up together with the playhead it moved.
+    pub fn pattern(&self) -> Option<PatternId> {
+        let p = self.pattern.load(Ordering::Acquire);
+        u32::try_from(p).ok().map(PatternId)
     }
 }
 
@@ -307,7 +318,11 @@ impl Engine {
         let (cmd_tx, cmd_rx) = RingBuffer::new(1024);
         let (ev_tx, ev_rx) = RingBuffer::new(4096);
         let (gb_tx, gb_rx) = RingBuffer::new(256);
-        let shared = Arc::new(Shared { playhead_bits: AtomicU64::new(0f64.to_bits()), playing: AtomicBool::new(false) });
+        let shared = Arc::new(Shared {
+            playhead_bits: AtomicU64::new(0f64.to_bits()),
+            playing: AtomicBool::new(false),
+            pattern: AtomicU64::new(u64::MAX),
+        });
         let sr = sample_rate.max(1) as f64;
         let engine = Engine {
             sr,
@@ -416,6 +431,12 @@ impl Engine {
         }
         self.shared.playhead_bits.store(self.position().to_bits(), Ordering::Relaxed);
         self.shared.playing.store(self.playing, Ordering::Relaxed);
+        let pattern = match self.mode {
+            PlayMode::Pattern(id) => id.0 as u64,
+            PlayMode::Song => u64::MAX,
+        };
+        // After the playhead: whoever sees this pattern sees its playhead.
+        self.shared.pattern.store(pattern, Ordering::Release);
         if std::mem::take(&mut self.midi_out_pushed) {
             if let Some(w) = &self.midi_out_waker {
                 w.unpark();
@@ -554,7 +575,18 @@ impl Engine {
                     self.live_channel = c;
                 }
             }
-            EngineCmd::SetRecording(r) => self.recording = r,
+            EngineCmd::SetRecording(r) => {
+                if r != self.recording {
+                    // Looping stops or resumes from the current position.
+                    self.rebase();
+                    self.recording = r;
+                    let before = self.s0;
+                    self.normalize_origin();
+                    if self.s0 != before {
+                        self.clock_jump();
+                    }
+                }
+            }
             EngineCmd::SetMetronome(m) => self.metronome = m,
         }
     }
@@ -579,6 +611,16 @@ impl Engine {
         }
     }
 
+    /// Recording in Pattern mode: playback goes on past the end of the pattern.
+    fn extending(&self) -> bool {
+        self.recording && !self.one_shot && matches!(self.mode, PlayMode::Pattern(_))
+    }
+
+    /// Playback loops the region at its end.
+    fn looping(&self) -> bool {
+        !self.one_shot && !self.extending()
+    }
+
     fn region_start(&self) -> f64 {
         self.region().map(|r| r.0).unwrap_or(0.0)
     }
@@ -587,7 +629,7 @@ impl Engine {
     fn song_at(&self, d: f64) -> f64 {
         let u = self.s0 + d;
         match self.region() {
-            Some((l0, l1)) if u >= l1 && !self.one_shot => {
+            Some((l0, l1)) if u >= l1 && self.looping() => {
                 let p = l1 - l0;
                 if p <= 0.0 { l0 } else { l0 + (u - l1) % p }
             }
@@ -600,7 +642,7 @@ impl Engine {
     fn position_ago(&self, ticks: f64) -> f64 {
         let p = self.song_at(self.frames as f64 / self.spt - ticks);
         match self.region() {
-            Some((l0, l1)) if p < l0 && l1 > l0 && !self.one_shot => {
+            Some((l0, l1)) if p < l0 && l1 > l0 && self.looping() => {
                 let r = (l0 - p) % (l1 - l0);
                 if r == 0.0 { l0 } else { l1 - r }
             }
@@ -630,7 +672,8 @@ impl Engine {
             self.s0 = 0.0;
         }
         if let Some((l0, l1)) = self.region() {
-            if self.s0 >= l1 {
+            // Past the end while recording: the pattern is growing.
+            if self.s0 >= l1 && !(self.playing && self.extending()) {
                 self.s0 = l0;
             }
         }
@@ -1195,6 +1238,8 @@ impl Engine {
     /// Collects the note-ons that fall within block `[frames, frames + n)`.
     fn gather(&mut self, n: usize) {
         let Some((l0, l1)) = self.region() else { return };
+        let extending = self.extending();
+        let looping = self.looping();
         let spt = self.spt;
         let f = self.frames as f64;
         // An event at Δ ticks lands on frame ceil(Δ·spt): it is in the block iff
@@ -1217,12 +1262,15 @@ impl Engine {
                 n,
                 out: &mut self.pending,
             };
-            // Linear part, before the end of the region.
-            if ulo < l1 {
+            // Linear part, before the end of the region. While recording there is no end:
+            // the pattern plays once, then the metronome goes on alone.
+            if extending {
+                ctx.query(Window { lo: ulo, hi: uhi, mn: f64::NEG_INFINITY, mx: f64::INFINITY, base: -self.s0 });
+            } else if ulo < l1 {
                 ctx.query(Window { lo: ulo, hi: uhi, mn: f64::NEG_INFINITY, mx: l1, base: -self.s0 });
             }
             // Repetitions of the region.
-            if !self.one_shot && uhi >= l1 {
+            if looping && uhi >= l1 {
                 let p = l1 - l0;
                 if p > 0.0 {
                     let kmin = ((ulo - l1) / p).floor().max(0.0) as i64;
@@ -1842,19 +1890,87 @@ mod tests {
     }
 
     #[test]
-    fn recorded_tick_wraps_at_loop_boundary() {
+    fn recording_does_not_wrap_at_pattern_end() {
         let (p, ch, _) = project_with_steps(&[], 16); // 3840 ticks = 96000 frames
         let (mut e, mut h, _log, mut tx) = midi_in_engine(&p, ch);
         e.handle_cmd(EngineCmd::SetLiveChannel(Some(ch)));
         e.handle_cmd(EngineCmd::SetRecording(true));
         e.handle_cmd(EngineCmd::Play);
-        run(&mut e, 120_000, &[500]); // 1.25 loops
+        run(&mut e, 120_000, &[500]); // 1.25 patterns
         tx.push(midi(true, 60, 100)).unwrap();
-        run(&mut e, 96_000 - 120_000 % 96_000, &[500]); // up to the end of loop 2
+        run(&mut e, 72_000, &[500]); // up to 2 patterns
         tx.push(midi(false, 60, 0)).unwrap();
         run(&mut e, 100, &[100]);
-        assert_eq!(recorded(&mut h), vec![(ch, 60, 100, 960.0, true), (ch, 60, 0, 0.0, false)]);
+        assert_eq!(recorded(&mut h), vec![(ch, 60, 100, 4800.0, true), (ch, 60, 0, 7680.0, false)]);
+        assert_eq!(e.position(), 7684.0);
     }
+
+    /// Probe engine on `p`, stopped, in Pattern mode on its first pattern.
+    fn stopped_probe_engine(p: &Project, ch: ChannelId) -> (Engine, Log) {
+        let (mut e, _h) = Engine::new(48_000, None, None);
+        let log: Log = Arc::default();
+        e.handle_cmd(EngineCmd::SetSlot(ch, SlotKind::Audio(Box::new(Probe { log: log.clone(), t: 0 }))));
+        e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(p))));
+        e.handle_cmd(EngineCmd::SetMode(PlayMode::Pattern(p.patterns[0].id)));
+        (e, log)
+    }
+
+    /// Left channel of `frames` frames rendered in callbacks of `block` frames.
+    fn render_left(e: &mut Engine, frames: usize, block: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; frames * 2];
+        for chunk in out.chunks_mut(2 * block) {
+            e.process(chunk, 2, 0.0);
+        }
+        out.iter().step_by(2).copied().collect()
+    }
+
+    /// Frames where a click starts (the probes are silent), counted from `t0`.
+    fn onsets(left: &[f32], t0: usize) -> Vec<usize> {
+        (0..left.len()).filter(|&i| left[i] != 0.0 && (i == 0 || left[i - 1] == 0.0)).map(|i| i + t0).collect()
+    }
+
+    #[test]
+    fn recording_plays_pattern_once_then_metronome_goes_on() {
+        // 48 kHz, 120 BPM: a beat is 24000 frames, the one-bar pattern 96000.
+        let (p, ch, pat) = project_with_steps(&[0, 8], 16);
+        let (mut e, log) = stopped_probe_engine(&p, ch);
+        e.handle_cmd(EngineCmd::SetMetronome(true));
+        e.handle_cmd(EngineCmd::SetRecording(true));
+        e.handle_cmd(EngineCmd::Play);
+        let left = render_left(&mut e, 3 * 96_000, 333);
+        assert_eq!(ons(&log), vec![0, 48_000]);
+        assert_eq!(onsets(&left, 0), (0..12).map(|b| b * 24_000).collect::<Vec<_>>());
+        assert_eq!(e.position(), 3.0 * 3840.0);
+        assert_eq!((e.shared.playhead(), e.shared.pattern()), (3.0 * 3840.0, Some(pat)));
+        // The app grows the pattern: playback goes on from the same position.
+        let mut longer = p.clone();
+        longer.pattern_mut(pat).unwrap().length = 4 * 3840;
+        e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(&longer))));
+        assert_eq!(e.position(), 3.0 * 3840.0);
+        // Recording turned off past the end of the pattern: back to its start.
+        e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(&p))));
+        assert_eq!(e.position(), 3.0 * 3840.0);
+        e.handle_cmd(EngineCmd::SetRecording(false));
+        assert_eq!(e.position(), 0.0);
+        render_left(&mut e, 96_000, 333);
+        assert_eq!(ons(&log), vec![0, 48_000, 3 * 96_000, 3 * 96_000 + 48_000]);
+    }
+
+    #[test]
+    fn recording_armed_while_playing_stops_looping_from_there() {
+        let (p, ch, _) = project_with_steps(&[], 16);
+        let (mut e, mut h, _log, mut tx) = midi_in_engine(&p, ch);
+        e.handle_cmd(EngineCmd::SetLiveChannel(Some(ch)));
+        e.handle_cmd(EngineCmd::Play);
+        run(&mut e, 120_000, &[500]); // looped once: tick 960
+        e.handle_cmd(EngineCmd::SetRecording(true));
+        assert_eq!(e.position(), 960.0);
+        run(&mut e, 96_000, &[500]);
+        tx.push(midi(true, 60, 100)).unwrap();
+        run(&mut e, 100, &[100]);
+        assert_eq!(recorded(&mut h), vec![(ch, 60, 100, 4800.0, true)]);
+    }
+
 
     #[test]
     fn recorded_note_placed_when_played() {
@@ -1875,8 +1991,8 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert!((r[0].3 - (1920.0 - 115.2)).abs() < 0.01, "{r:?}");
 
-        // Played just before the loop restarted: wrapped back to the end of the pattern.
-        run(&mut e, 96_000 - 48_000 - 500 + 24, &[500]); // 1 ms into the next loop
+        // Heard 1 ms past the end of the pattern, played before it: placed before the end.
+        run(&mut e, 96_000 - 48_000 - 500 + 24, &[500]); // 1 ms past the end
         tx.push(MidiInMsg { bytes: [0x80, 60, 0], len: 3, time: Some(Instant::now()) }).unwrap();
         e.process_at(&mut buf, 2, 0.01, Instant::now());
         let r = recorded(&mut h);
