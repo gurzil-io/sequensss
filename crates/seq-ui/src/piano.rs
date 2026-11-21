@@ -7,8 +7,8 @@
 //! Brush: press on a note then drag = end-to-end copies of that note; on empty
 //! space = notes of the last used length. Pitch follows the finger.
 //!
-//! Touch: two fingers scroll and zoom; with notes selected, three fingers change their
-//! length (two hold, the third slides left or right).
+//! Touch: two fingers scroll and zoom. One finger holding a note still while another one
+//! slides up or down changes the active parameter of that note.
 
 use crate::skin::{self, Kind};
 use crate::theme::*;
@@ -63,6 +63,16 @@ enum Drag {
 
 /// Vertical drag (points) beyond which a keyboard press becomes a scroll.
 const KB_SCROLL_SLOP: f32 = 8.0;
+/// Parameter gesture: the finger on the note must not have moved more than this (points)
+/// and must have been down this long (s) when the second finger lands; otherwise the two
+/// fingers scroll and zoom (two fingers landing together are a pinch).
+const ANCHOR_SLOP: f32 = 16.0;
+const ANCHOR_HOLD: f64 = 0.1;
+/// Parameter gesture sensitivity: vertical slide (points) per velocity unit, per pan unit
+/// (the whole pan range in about 380 points) and per length step.
+const VEL_PX: f32 = 3.0;
+const PAN_PX: f32 = 3.0;
+const LEN_PX: f32 = 24.0;
 /// After a manual scroll or zoom, the view stops following the playhead for this long (s).
 const FOLLOW_PAUSE: f64 = 2.0;
 
@@ -94,14 +104,28 @@ pub struct PianoState {
     /// Time of the last manual scroll or zoom.
     scrolled_at: f64,
     /// Selection and note count when the current press began: restored if the press
-    /// becomes a two-finger gesture (so the selection survives the start of a three-finger one).
+    /// becomes a two-finger gesture (so the selection survives the start of a parameter one).
     press_sel: Option<(Vec<usize>, usize)>,
+    /// The current press landed on an existing note: index, position, time. It may become
+    /// the anchor of a parameter gesture.
+    press_note: Option<(usize, Pos2, f64)>,
     fingers: Fingers,
-    /// Three fingers came down on the piano roll since all fingers were last up: no scroll,
-    /// zoom or editing until they are all lifted.
-    three: bool,
-    /// Three-finger length change in progress: initial state of the selected notes.
-    stretch: Option<Vec<(usize, Note)>>,
+    multi: Multi,
+}
+
+/// What the fingers do once a second one is down, until they are all lifted.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Multi {
+    /// At most one finger.
+    #[default]
+    Off,
+    /// Scroll and zoom.
+    View,
+    /// Parameter gesture: `anchor` holds note `note`, `mover` slides up or down. `orig` =
+    /// the edited notes before the gesture, taken once the first finger's edit is undone.
+    Param { anchor: TouchId, mover: TouchId, note: usize, orig: Option<Vec<(usize, Note)>> },
+    /// Parameter gesture over, the note still held: another finger can start a new one.
+    Held { anchor: TouchId, note: usize },
 }
 
 /// Touches currently down, tracked one by one (egui's `multi_touch` only gives aggregates):
@@ -129,20 +153,49 @@ impl Fingers {
         self.0.len()
     }
 
-    /// Movements are measured from now on.
-    fn rebase(&mut self) {
-        for f in &mut self.0 {
-            f.1 = f.2;
-        }
+    /// Start and current position of a finger.
+    fn get(&self, id: TouchId) -> Option<(Pos2, Pos2)> {
+        self.0.iter().find(|f| f.0 == id).map(|f| (f.1, f.2))
     }
 
-    fn all_in(&self, r: Rect) -> bool {
-        self.0.iter().all(|f| r.contains(f.2))
+    fn has(&self, id: TouchId) -> bool {
+        self.0.iter().any(|f| f.0 == id)
     }
 
-    /// Horizontal movement of the finger that moved the most sideways (the others hold).
-    fn moving_dx(&self) -> f32 {
-        self.0.iter().map(|f| f.2.x - f.1.x).fold(0.0, |a, d| if d.abs() > a.abs() { d } else { a })
+    /// The finger that landed last.
+    fn newest(&self) -> Option<(TouchId, Pos2, Pos2)> {
+        self.0.last().copied()
+    }
+
+    /// The finger that started closest to `at`.
+    fn started_near(&self, at: Pos2) -> Option<(TouchId, Pos2, Pos2)> {
+        self.0.iter().copied().min_by(|a, b| a.1.distance(at).total_cmp(&b.1.distance(at)))
+    }
+}
+
+/// Mode when a second finger lands: a parameter gesture if the first finger pressed an
+/// existing note (`press`: note, position, time) at least `ANCHOR_HOLD` ago, is still
+/// within `ANCHOR_SLOP` of where it landed, and the new finger is in the grid. Otherwise
+/// (empty space, finger moved, both landing together): scroll and zoom.
+fn start_multi(fingers: &Fingers, press: Option<(usize, Pos2, f64)>, now: f64, grid: Rect) -> Multi {
+    let (Some((note, at, t)), Some(mover)) = (press, fingers.newest()) else { return Multi::View };
+    let Some((anchor, start, cur)) = fingers.started_near(at) else { return Multi::View };
+    let still = start.distance(at) <= ANCHOR_SLOP && cur.distance(at) <= ANCHOR_SLOP;
+    if anchor != mover.0 && still && now - t >= ANCHOR_HOLD && grid.contains(mover.1) {
+        Multi::Param { anchor, mover: mover.0, note, orig: None }
+    } else {
+        Multi::View
+    }
+}
+
+/// Change of `param` for a vertical slide of `dy` points (down > 0, as on screen): up =
+/// more. Length changes by whole grid steps (a 1/64 note when the snap is free).
+fn gesture_delta(param: NoteParam, dy: f32, snap: Tick) -> i64 {
+    let up = -dy;
+    match param {
+        NoteParam::Velocity => (up / VEL_PX).round() as i64,
+        NoteParam::Pan => (up / PAN_PX).round() as i64,
+        NoteParam::Length => (up / LEN_PX).round() as i64 * if snap > 1 { snap } else { STEP / 4 } as i64,
     }
 }
 
@@ -166,9 +219,9 @@ impl Default for PianoState {
             fresh: None,
             scrolled_at: f64::NEG_INFINITY,
             press_sel: None,
+            press_note: None,
             fingers: Fingers::default(),
-            three: false,
-            stretch: None,
+            multi: Multi::Off,
         }
     }
 }
@@ -300,7 +353,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     // Room after the end of the pattern: one bar, where notes can be placed (the pattern grows).
     let reach = (base_len + bar).max(pat_len);
 
-    // --- Individual touches (three-finger gesture) ---
+    // --- Individual touches (parameter gesture) ---
     let (touch_events, any_touches) = ui.input(|i| {
         let ev: Vec<(TouchId, TouchPhase, Pos2)> = i
             .events
@@ -317,20 +370,28 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     }
     if !any_touches {
         ps.fingers = Fingers::default();
-        ps.three = false;
+        ps.multi = Multi::Off;
+        ps.press_note = None;
     }
-    let three_start = !ps.three && ps.fingers.count() >= 3 && ps.fingers.all_in(area);
-    if three_start {
-        ps.three = true;
-        ps.fingers.rebase();
+    if ps.fingers.count() >= 2 {
+        ps.multi = match std::mem::take(&mut ps.multi) {
+            Multi::Off => start_multi(&ps.fingers, ps.press_note, pointer.time, grid),
+            // Note still held: a new finger starts a new parameter gesture.
+            Multi::Held { anchor, note } if ps.fingers.has(anchor) => match ps.fingers.newest() {
+                Some((mover, start, _)) if mover != anchor && grid.contains(start) => Multi::Param { anchor, mover, note, orig: None },
+                _ => Multi::Held { anchor, note },
+            },
+            m => m,
+        };
     }
+    let scroll_ok = matches!(ps.multi, Multi::Off | Multi::View);
 
     // --- Scroll / zoom ---
     if ps.centered_for != Some(ch) {
         ps.centered_for = Some(ch);
         ps.scroll_y = (127.0 - default_key as f32) * ps.key_h - grid.height() / 2.0;
     }
-    if (resp.hovered() || pointer.multi) && !ps.three {
+    if (resp.hovered() || pointer.multi) && scroll_ok {
         if pointer.zoom != 1.0 {
             let anchor_tick = pointer.pos.map(|p| (p.x - grid.left() + ps.scroll_x) / ps.zoom).unwrap_or(0.0);
             ps.zoom = (ps.zoom * pointer.zoom).clamp(0.01, 2.0);
@@ -358,6 +419,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     // Follows the playhead bar by bar, unless the user just scrolled or is editing.
     if let Some(ph) = playhead
         && ps.drag.is_none()
+        && !matches!(ps.multi, Multi::Param { .. } | Multi::Held { .. })
         && pointer.time - ps.scrolled_at > FOLLOW_PAUSE
     {
         let x = ph as f32 * ps.zoom - ps.scroll_x;
@@ -388,6 +450,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let unchanged = matches!(&ps.seen, Some((p, c, n)) if *p == pat_id && *c == ch && *n == notes_snapshot);
     if !unchanged {
         ps.selected.clear();
+        if matches!(ps.multi, Multi::Param { .. } | Multi::Held { .. }) {
+            ps.multi = Multi::View;
+        }
         match ps.drag.take() {
             Some(Drag::Keyboard { key, .. } | Drag::Move { key, .. } | Drag::Paint { brush: Note { key, .. }, .. }) => {
                 actions.push(UiAction::Preview { channel: ch, key, vel: 0, on: false })
@@ -471,26 +536,39 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         }
     }
 
-    // --- Three fingers: the moving one changes the length of the selected notes ---
-    if three_start && !ps.selected.is_empty() {
-        ps.stretch = Some(ps.selected.iter().filter_map(|&i| notes.get(i).map(|n| (i, *n))).collect());
-    }
-    if let Some(orig) = &ps.stretch {
-        if ps.fingers.count() >= 3 {
-            let base: Vec<Note> = orig.iter().map(|(_, n)| *n).collect();
-            let lens = stretch_lengths(&base, ps.fingers.moving_dx(), ps.zoom, snap, limit);
-            for (&(i, _), len) in orig.iter().zip(lens) {
-                if let Some(m) = notes.get_mut(i) {
-                    m.len = len;
-                }
-            }
+    // --- Parameter gesture: one finger holds a note, another slides up or down ---
+    if let Multi::Param { note, orig: orig @ None, .. } = &mut ps.multi {
+        if *note < notes.len() {
+            ps.selected = vec![*note];
+            *orig = Some(ps.selected.iter().map(|&i| (i, notes[i])).collect());
         } else {
-            // A finger lifted: the lengths stay as they are.
-            if let Some(n) = orig.first().and_then(|&(i, _)| notes.get(i)) {
-                ps.last_len = n.len;
-            }
-            ps.stretch = None;
+            ps.multi = Multi::View;
         }
+    }
+    let mut gesture_at = None;
+    let mut ended = None;
+    if let Multi::Param { anchor, mover, note, orig: Some(orig) } = &ps.multi {
+        match (ps.fingers.has(*anchor), ps.fingers.get(*mover)) {
+            (true, Some((start, cur))) => {
+                // Only the active parameter changes: pitch and position stay.
+                let delta = gesture_delta(ps.param, cur.y - start.y, snap);
+                seq_edit::adjust_param(&mut notes, orig, ps.param, delta, seq_edit::min_note_len(snap), limit);
+                gesture_at = Some(cur);
+            }
+            // A finger lifted: the gesture ends, the values stay.
+            (held, _) => ended = Some((held.then_some(*anchor), *note)),
+        }
+    }
+    if let Some((anchor, note)) = ended {
+        if ps.param == NoteParam::Length
+            && let Some(n) = notes.get(note)
+        {
+            ps.last_len = n.len;
+        }
+        ps.multi = match anchor {
+            Some(anchor) => Multi::Held { anchor, note },
+            None => Multi::View,
+        };
     }
 
     // --- Mouse: press ---
@@ -513,9 +591,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             None => None,
         }
     };
-    if let Some(pos) = pointer.pos.filter(|_| resp.hovered() && !ps.three) {
+    if let Some(pos) = pointer.pos.filter(|_| resp.hovered() && ps.multi == Multi::Off) {
         if pointer.primary_pressed {
             ps.press_sel = Some((ps.selected.clone(), notes.len()));
+            ps.press_note = None;
             if kb.contains(pos) {
                 let key = key_of(pos.y);
                 actions.push(UiAction::Preview { channel: ch, key, vel: 100, on: true });
@@ -528,6 +607,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 let t = tick_of(pos.x);
                 let h = hit(&notes, pos);
                 let edge = edge_of(&notes, h, pos);
+                if tool != Tool::Erase {
+                    ps.press_note = h.map(|i| (i, pos, pointer.time));
+                }
                 match (tool, h) {
                     (Tool::Erase, _) => ps.drag = Some(Drag::Erase),
                     // Brush: copies the touched note, otherwise places a note of the last used length.
@@ -608,7 +690,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 
     // --- Double tap on a note: delete it (quick delete on touch, no tool change) ---
     if pointer.double_clicked
-        && !ps.three
+        && ps.multi == Multi::Off
         && tool != Tool::Erase
         && !pointer.shift
         && !pointer.command
@@ -756,7 +838,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         p.length = new_len;
     }
     let pat_len = new_len;
-    ps.grow_base = (ps.drag.is_some() || ps.stretch.is_some()).then_some((pat_id, base_len));
+    ps.grow_base = (ps.drag.is_some() || matches!(ps.multi, Multi::Param { .. })).then_some((pat_id, base_len));
     if baked {
         if let Some(c) = project.channel_mut(ch) {
             c.arp.enabled = false;
@@ -897,6 +979,24 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         }
     }
 
+    // Parameter gesture: the value, next to the moving finger.
+    if let Some(at) = gesture_at {
+        let value = seq_edit::param_range(&notes, &selected, param).map(|r| range_text(param, r)).unwrap_or_default();
+        let fp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("param_label")));
+        let g = fp.layout_no_wrap(format!("{}  {}", param_short(param), value), bold(22.0), TEXT);
+        let size = g.size() + vec2(28.0, 16.0);
+        // Above the finger, kept on screen.
+        let screen = ui.ctx().screen_rect();
+        let c = pos2(
+            at.x.clamp(screen.left() + size.x / 2.0, (screen.right() - size.x / 2.0).max(screen.left() + size.x / 2.0)),
+            (at.y - 90.0).max(screen.top() + size.y / 2.0),
+        );
+        let r = Rect::from_center_size(c, size);
+        fp.rect_filled(r, 10.0, POPUP);
+        fp.rect_stroke(r, 10.0, Stroke::new(2.0_f32, ORANGE));
+        fp.galley(r.center() - g.size() / 2.0, g, TEXT);
+    }
+
     if let Some(r) = side {
         side_panel(ui, r, &mut ps.param, &notes, &selected);
     }
@@ -936,7 +1036,14 @@ fn side_panel(ui: &Ui, rect: Rect, param: &mut NoteParam, notes: &[Note], select
         n => trf!("{} notes sélectionnées", "{} notes selected", n),
     };
     let g = p.layout(count, body(13.5), TEXT_DIM, inner.width());
+    let bottom = lcd_r.bottom() + 10.0 + g.size().y;
     p.galley(pos2(inner.left() + 2.0, lcd_r.bottom() + 10.0), g, TEXT_DIM);
+    let hint = tr!("Tenez une note et glissez un autre doigt vers le haut ou le bas.", "Hold a note and slide another finger up or down.");
+    let g = p.layout(hint.to_string(), body(12.5), TEXT_DIMMER, inner.width());
+    let y = inner.bottom() - g.size().y;
+    if y > bottom + 8.0 {
+        p.galley(pos2(inner.left() + 2.0, y), g, TEXT_DIMMER);
+    }
 }
 
 /// Lane label: the active parameter (name and position in the cycle), tappable.
@@ -1022,23 +1129,6 @@ pub(crate) fn pattern_playhead(arr: &Arrangement, pattern: PatternId, pat_len: T
         .filter(|c| c.pattern == pattern && c.len > 0 && pos >= c.start as f64 && pos < (c.start + c.len) as f64)
         .max_by_key(|c| c.start)
         .map(|c| (pos - c.start as f64) % plen)
-}
-
-/// Lengths of `notes` after a three-finger slide of `dx_px` points at `zoom` points per tick:
-/// the change is a whole number of `snap` units, applied to every note, which keeps at
-/// least a minimal length and doesn't grow past `limit` (one already past it isn't cut).
-pub(crate) fn stretch_lengths(notes: &[Note], dx_px: f32, zoom: f32, snap: Tick, limit: Tick) -> Vec<Tick> {
-    let snap = snap.max(1);
-    let min_len = snap.clamp(1, STEP / 4);
-    let steps = (dx_px / zoom.max(f32::EPSILON) / snap as f32).round() as i64;
-    let delta = steps.saturating_mul(snap as i64);
-    notes
-        .iter()
-        .map(|n| {
-            let len = (n.len as i64).saturating_add(delta).max(min_len as i64) as Tick;
-            if delta > 0 { len.min(limit.saturating_sub(n.start).max(n.len)) } else { len }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -1132,51 +1222,11 @@ mod param_tests {
 }
 
 #[cfg(test)]
-mod stretch_tests {
+mod gesture_tests {
     use super::*;
 
-    fn note(start: Tick, len: Tick) -> Note {
-        Note { start, len, key: 60, velocity: 100, pan: 0 }
-    }
-
     #[test]
-    fn slide_snaps_to_the_grid() {
-        let notes = [note(0, STEP), note(STEP, 2 * STEP)];
-        // zoom 0.1: one step (240 ticks) = 24 points.
-        assert_eq!(stretch_lengths(&notes, 0.0, 0.1, STEP, 10_000), vec![STEP, 2 * STEP]);
-        assert_eq!(stretch_lengths(&notes, 11.0, 0.1, STEP, 10_000), vec![STEP, 2 * STEP]);
-        assert_eq!(stretch_lengths(&notes, 13.0, 0.1, STEP, 10_000), vec![2 * STEP, 3 * STEP]);
-        assert_eq!(stretch_lengths(&notes, 50.0, 0.1, STEP, 10_000), vec![3 * STEP, 4 * STEP]);
-        assert_eq!(stretch_lengths(&notes, -24.0, 0.1, STEP, 10_000)[1], STEP);
-    }
-
-    #[test]
-    fn off_grid_lengths_keep_their_offset() {
-        let notes = [note(0, STEP + 7)];
-        assert_eq!(stretch_lengths(&notes, 24.0, 0.1, STEP, 10_000), vec![2 * STEP + 7]);
-        // Free snap: tick precision.
-        assert_eq!(stretch_lengths(&notes, 1.0, 0.1, 1, 10_000), vec![STEP + 17]);
-    }
-
-    #[test]
-    fn minimal_length() {
-        let notes = [note(0, STEP), note(0, 4 * STEP)];
-        assert_eq!(stretch_lengths(&notes, -240.0, 0.1, STEP, 10_000), vec![STEP / 4, STEP / 4]);
-        // Free snap: down to one tick.
-        assert_eq!(stretch_lengths(&notes, -1000.0, 0.1, 1, 10_000), vec![1, 1]);
-    }
-
-    #[test]
-    fn growth_stops_at_the_limit() {
-        let notes = [note(0, STEP), note(3 * STEP, STEP), note(10 * STEP, STEP)];
-        let limit = 4 * STEP;
-        assert_eq!(stretch_lengths(&notes, 1000.0, 0.1, STEP, limit), vec![4 * STEP, STEP, STEP]);
-        // Shrinking a note already past the limit still works.
-        assert_eq!(stretch_lengths(&[note(10 * STEP, 2 * STEP)], -24.0, 0.1, STEP, limit), vec![STEP]);
-    }
-
-    #[test]
-    fn fingers_track_the_moving_one() {
+    fn fingers_tracked_one_by_one() {
         let mut f = Fingers::default();
         f.apply(TouchId(1), TouchPhase::Start, pos2(10.0, 10.0));
         f.apply(TouchId(2), TouchPhase::Start, pos2(30.0, 10.0));
@@ -1184,15 +1234,64 @@ mod stretch_tests {
         assert_eq!(f.count(), 3);
         f.apply(TouchId(1), TouchPhase::Move, pos2(12.0, 11.0));
         f.apply(TouchId(3), TouchPhase::Move, pos2(260.0, 30.0));
-        assert_eq!(f.moving_dx(), -40.0);
-        f.rebase();
-        assert_eq!(f.moving_dx(), 0.0);
-        f.apply(TouchId(3), TouchPhase::Move, pos2(290.0, 30.0));
-        assert_eq!(f.moving_dx(), 30.0);
+        assert_eq!(f.get(TouchId(3)), Some((pos2(300.0, 10.0), pos2(260.0, 30.0))));
+        assert_eq!(f.newest().map(|n| n.0), Some(TouchId(3)));
+        assert_eq!(f.started_near(pos2(28.0, 12.0)).map(|n| n.0), Some(TouchId(2)));
         f.apply(TouchId(2), TouchPhase::End, pos2(30.0, 10.0));
         f.apply(TouchId(9), TouchPhase::Cancel, pos2(0.0, 0.0));
         assert_eq!(f.count(), 2);
-        assert!(f.all_in(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 100.0))));
-        assert!(!f.all_in(Rect::from_min_size(Pos2::ZERO, vec2(100.0, 100.0))));
+        assert!(f.has(TouchId(1)) && !f.has(TouchId(2)));
+        // A move whose start was missed: tracked from there.
+        f.apply(TouchId(4), TouchPhase::Move, pos2(50.0, 50.0));
+        assert_eq!(f.get(TouchId(4)), Some((pos2(50.0, 50.0), pos2(50.0, 50.0))));
+    }
+
+    const GRID: Rect = Rect { min: Pos2 { x: 100.0, y: 0.0 }, max: Pos2 { x: 1000.0, y: 600.0 } };
+
+    /// First finger pressed note 3 at (200, 100) at t = 1 s and is now at `anchor_now`;
+    /// the second lands at `second`.
+    fn second_lands(anchor_now: Pos2, second: Pos2, now: f64, on_note: bool) -> Multi {
+        let mut f = Fingers::default();
+        f.apply(TouchId(1), TouchPhase::Start, pos2(200.0, 100.0));
+        f.apply(TouchId(1), TouchPhase::Move, anchor_now);
+        f.apply(TouchId(2), TouchPhase::Start, second);
+        start_multi(&f, on_note.then_some((3, pos2(200.0, 100.0), 1.0)), now, GRID)
+    }
+
+    #[test]
+    fn holding_a_note_still_starts_a_parameter_gesture() {
+        let param = Multi::Param { anchor: TouchId(1), mover: TouchId(2), note: 3, orig: None };
+        assert_eq!(second_lands(pos2(200.0, 100.0), pos2(600.0, 300.0), 1.5, true), param);
+        // A little jitter is fine.
+        assert_eq!(second_lands(pos2(208.0, 106.0), pos2(600.0, 300.0), 1.5, true), param);
+    }
+
+    #[test]
+    fn otherwise_two_fingers_scroll_and_zoom() {
+        // First finger on empty space.
+        assert_eq!(second_lands(pos2(200.0, 100.0), pos2(600.0, 300.0), 1.5, false), Multi::View);
+        // First finger moved (it was dragging the note).
+        assert_eq!(second_lands(pos2(240.0, 100.0), pos2(600.0, 300.0), 1.5, true), Multi::View);
+        // Both fingers landing together: a pinch.
+        assert_eq!(second_lands(pos2(200.0, 100.0), pos2(600.0, 300.0), 1.05, true), Multi::View);
+        // Second finger outside the grid (keyboard, lane, side panel).
+        assert_eq!(second_lands(pos2(200.0, 100.0), pos2(50.0, 300.0), 1.5, true), Multi::View);
+        assert_eq!(second_lands(pos2(200.0, 100.0), pos2(600.0, 700.0), 1.5, true), Multi::View);
+    }
+
+    #[test]
+    fn slide_up_is_more() {
+        // Velocity and pan: one unit per 3 points, up = more.
+        assert_eq!(gesture_delta(NoteParam::Velocity, 0.0, STEP), 0);
+        assert_eq!(gesture_delta(NoteParam::Velocity, -30.0, STEP), 10);
+        assert_eq!(gesture_delta(NoteParam::Velocity, 30.0, STEP), -10);
+        assert_eq!(gesture_delta(NoteParam::Pan, -381.0, STEP), 127);
+        // Length: whole grid steps, one per 24 points.
+        assert_eq!(gesture_delta(NoteParam::Length, -11.0, STEP), 0);
+        assert_eq!(gesture_delta(NoteParam::Length, -13.0, STEP), STEP as i64);
+        assert_eq!(gesture_delta(NoteParam::Length, -50.0, PPQ as Tick / 2), PPQ as i64);
+        assert_eq!(gesture_delta(NoteParam::Length, 24.0, STEP), -(STEP as i64));
+        // Free snap: 1/64 notes.
+        assert_eq!(gesture_delta(NoteParam::Length, -48.0, 1), STEP as i64 / 2);
     }
 }
