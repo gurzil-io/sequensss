@@ -344,6 +344,13 @@ pub fn auto_button(ui: &mut Ui, h: f32, kind: Kind, text: &str) -> Response {
     text_button(ui, vec2(tw + 28.0, h), kind, text, font)
 }
 
+/// Small corner triangle: the button has more options (long press / right-click).
+pub fn more_mark(p: &Painter, rect: Rect, color: Color32) {
+    let c = rect.right_bottom() - vec2(6.0, 6.0);
+    let pts = vec![c, c - vec2(7.0, 0.0), c - vec2(0.0, 7.0)];
+    p.add(Shape::convex_polygon(pts, with_alpha(color, (color.a() as f32 * 0.55) as u8), Stroke::NONE));
+}
+
 // ---------------------------------------------------------------------------
 // Segmented selector
 // ---------------------------------------------------------------------------

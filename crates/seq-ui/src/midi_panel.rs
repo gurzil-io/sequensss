@@ -82,15 +82,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) {
         p.rect_stroke(r, 7.0, egui::Stroke::new(1.0_f32, pal().edge));
         p.with_clip_rect(r).text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, tr!("Quantifier l'enreg.", "Quantize rec."), body(15.0), pal().text);
         // Active grid: the piano roll snap.
-        let grid = match st.record_grid() {
-            0 | 1 => tr!("Non", "Off"),
-            g if g == PPQ as Tick => "1/4",
-            g if g == PPQ as Tick / 2 => "1/8",
-            STEP => "1/16",
-            g if g == PPQ as Tick / 8 => "1/32",
-            g if g == PPQ as Tick / 6 => tr!("Triol.", "Triplet"),
-            _ => "?",
-        };
+        let grid = st.record_grid_label();
         let gc = if st.record_grid() > 1 { pal().orange_top } else { pal().text_dimmer };
         skin::gtext(&p, pos2(r.right() - 80.0, r.center().y), Align2::RIGHT_CENTER, grid, body(15.0), gc);
         let mut su = ui.new_child(UiBuilder::new().max_rect(Rect::from_center_size(pos2(r.right() - 38.0, r.center().y), vec2(64.0, 34.0))));
@@ -109,6 +101,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) {
             "Avec l'enregistrement armé, Lecture depuis l'arrêt joue une mesure de clics avant de démarrer",
             "With recording armed, Play from stop clicks one bar before starting"
         ));
+        ui.add_space(2.0);
+        skin::hint(ui, tr!("Aussi : appui long (clic droit) sur Enregistrer.", "Also: long press (right-click) on Record."));
     });
 
     // --- Right column: MIDI outputs ---

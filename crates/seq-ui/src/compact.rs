@@ -40,7 +40,7 @@ impl SeqUi {
         }
         let rec = self.recording;
         let count_in = info.count_in;
-        if skin::button(ui, vec2(52.0, H), Kind::Cream, rec, |p, r, _| {
+        let rec_btn = skin::button(ui, vec2(52.0, H), Kind::Cream, rec, |p, r, c| {
             // Count-in: the beats left (the position display may not fit).
             if count_in > 0 {
                 skin::gtext(&p, r.center(), Align2::CENTER_CENTER, count_in.to_string(), lcd(30.0), pal().rec_red);
@@ -49,11 +49,13 @@ impl SeqUi {
             } else {
                 icons::draw(p, r, 18.0, Icon::Record, pal().rec_red, 1.0);
             }
+            skin::more_mark(p, r, c);
         })
-        .clicked()
-        {
+        .on_hover_text(tr!("Clic droit / appui long : décompte, quantification", "Right-click / long press: count-in, quantize"));
+        if rec_btn.clicked() {
             self.recording = !self.recording;
         }
+        rec_btn.context_menu(|ui| self.record_options(ui));
         let metro = self.metronome;
         if skin::button(ui, vec2(52.0, H), Kind::Dark, false, |p, r, _| {
             let c = if metro { pal().lcd_green } else { pal().text_dimmer };

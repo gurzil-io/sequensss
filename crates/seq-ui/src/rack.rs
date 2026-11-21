@@ -305,47 +305,60 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             }
             let tresp = tresp.on_hover_text(hover);
             tresp.context_menu(|ui| {
-                ui.set_min_width(290.0);
-                skin::menu_caption(ui, &format!("{} · {}", ch.name.to_uppercase(), ch.kind.label().to_uppercase()));
-                if st.replacing == Some(ch.id) {
-                    replace_items(st, ui, project, &ch);
-                    return;
-                }
-                if skin::menu_item(ui, tr!("Ouvrir dans le piano roll", "Open in piano roll"), pal().text, false).clicked() {
-                    st.channel = Some(ch.id);
-                    st.active_editor = Editor::Piano;
-                    st.show_panel(PanelId::Piano);
-                    ui.close_menu();
-                }
-                if skin::menu_item(ui, tr!("Renommer…", "Rename…"), pal().text, false).clicked() {
-                    st.renaming_channel = Some((ch.id, ch.name.clone()));
-                    ui.close_menu();
-                }
-                if skin::menu_item(ui, tr!("Dupliquer", "Duplicate"), pal().text, false).clicked() {
-                    op = Some(RowOp::Duplicate(ch.id));
-                    ui.close_menu();
-                }
-                if skin::menu_item(ui, tr!("Remplacer par…", "Replace with…"), pal().text, false).clicked() {
-                    st.replacing = Some(ch.id);
-                }
-                note_clipboard_items(st, ui, project, pat_id, ch.id);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let w = (ui.available_width() - 4.0) / 2.0;
-                    if skin::text_button(ui, vec2(w, 44.0), Kind::Dark, tr!("↑ Monter", "↑ Move up"), body(15.0)).clicked() {
-                        op = Some(RowOp::Move(ch.id, true));
+                // Small landscape phone: the menu scrolls rather than run off the screen.
+                let max_h = ui.ctx().screen_rect().height() - 24.0;
+                egui::ScrollArea::vertical().max_height(max_h).show(ui, |ui| {
+                    ui.set_min_width(290.0);
+                    skin::menu_caption(ui, &format!("{} · {}", ch.name.to_uppercase(), ch.kind.label().to_uppercase()));
+                    if st.replacing == Some(ch.id) {
+                        replace_items(st, ui, project, &ch);
+                        return;
+                    }
+                    if skin::menu_item(ui, tr!("Ouvrir dans le piano roll", "Open in piano roll"), pal().text, false).clicked() {
+                        st.channel = Some(ch.id);
+                        st.active_editor = Editor::Piano;
+                        st.show_panel(PanelId::Piano);
                         ui.close_menu();
                     }
-                    if skin::text_button(ui, vec2(w, 44.0), Kind::Dark, tr!("↓ Descendre", "↓ Move down"), body(15.0)).clicked() {
-                        op = Some(RowOp::Move(ch.id, false));
+                    if skin::menu_item(ui, tr!("Son…", "Sound…"), pal().text, false).clicked() {
+                        st.open_sound_settings(ch.id);
+                        ui.close_menu();
+                    }
+                    // Rename and duplicate share a row, so the menu still fits a phone in landscape.
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let w = (ui.available_width() - 4.0) / 2.0;
+                        if skin::text_button(ui, vec2(w, 44.0), Kind::Dark, tr!("Renommer…", "Rename…"), body(15.0)).clicked() {
+                            st.renaming_channel = Some((ch.id, ch.name.clone()));
+                            ui.close_menu();
+                        }
+                        if skin::text_button(ui, vec2(w, 44.0), Kind::Dark, tr!("Dupliquer", "Duplicate"), body(15.0)).clicked() {
+                            op = Some(RowOp::Duplicate(ch.id));
+                            ui.close_menu();
+                        }
+                    });
+                    if skin::menu_item(ui, tr!("Remplacer par…", "Replace with…"), pal().text, false).clicked() {
+                        st.replacing = Some(ch.id);
+                    }
+                    note_clipboard_items(st, ui, project, pat_id, ch.id);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let w = (ui.available_width() - 4.0) / 2.0;
+                        if skin::text_button(ui, vec2(w, 44.0), Kind::Dark, tr!("↑ Monter", "↑ Move up"), body(15.0)).clicked() {
+                            op = Some(RowOp::Move(ch.id, true));
+                            ui.close_menu();
+                        }
+                        if skin::text_button(ui, vec2(w, 44.0), Kind::Dark, tr!("↓ Descendre", "↓ Move down"), body(15.0)).clicked() {
+                            op = Some(RowOp::Move(ch.id, false));
+                            ui.close_menu();
+                        }
+                    });
+                    skin::menu_separator(ui);
+                    if skin::menu_item(ui, tr!("Supprimer", "Delete"), pal().danger, false).clicked() {
+                        op = Some(RowOp::Delete(ch.id));
                         ui.close_menu();
                     }
                 });
-                skin::menu_separator(ui);
-                if skin::menu_item(ui, tr!("Supprimer", "Delete"), pal().danger, false).clicked() {
-                    op = Some(RowOp::Delete(ch.id));
-                    ui.close_menu();
-                }
             });
 
             // Steps

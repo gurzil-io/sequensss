@@ -10,21 +10,17 @@ use seq_model::*;
 use seq_i18n::{tr, trf};
 
 pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, _info: &PlaybackInfo) {
-    let ch_id = st.channel.filter(|c| project.channel(*c).is_some());
-    let chip = ch_id.and_then(|c| project.channel(c)).map(|c| (c.name.clone(), c.kind.label(), id_color(c.id.0)));
+    let mut ch_id = st.channel.filter(|c| project.channel(*c).is_some());
+    let mut pick = None;
     let res = skin::panel_bare(ui, rect, tr!("RÉGLAGES DU SON", "SOUND SETTINGS"), pal().orange, |ui| {
-        if let Some((name, kind, color)) = &chip {
-            let font = body(15.0);
-            let w1 = ui.fonts(|f| f.layout_no_wrap(name.clone(), font.clone(), pal().text).size().x);
-            let w2 = ui.fonts(|f| f.layout_no_wrap(format!("· {kind}"), medium(13.0), pal().text).size().x);
-            let (r, _) = ui.allocate_exact_size(vec2(w1 + w2 + 44.0, 38.0), Sense::hover());
-            let p = ui.painter();
-            p.rect_filled(r, 7.0, pal().dark_tile);
-            skin::led(p, pos2(r.left() + 17.0, r.center().y), 5.0, *color, true);
-            skin::gtext(&p, pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, name, font, pal().text);
-            skin::gtext(&p, pos2(r.left() + 36.0 + w1, r.center().y), Align2::LEFT_CENTER, format!("· {kind}"), medium(13.0), pal().text_dimmer);
+        if let Some(cur) = ch_id.and_then(|c| project.channel(c)) {
+            pick = channel_picker(ui, project, cur);
         }
     });
+    if let Some(c) = pick {
+        st.channel = Some(c);
+        ch_id = Some(c);
+    }
     let area = res.body.shrink(10.0);
     let Some(id) = ch_id else {
         ui.painter().text(area.center(), Align2::CENTER_CENTER, tr!("Aucun channel sélectionné", "No channel selected"), body(16.0), pal().text_dimmer);
@@ -143,7 +139,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, _inf
             String::new()
         };
         let mut b = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(pos2(c.left(), c.bottom() - row_h), c.max)));
-        let full = tr!("Réglages…", "Settings…");
+        let full = tr!("Réglages arp…", "Arp settings…");
         let tw = ui.fonts(|f| f.layout_no_wrap(full.to_string(), body(14.0), pal().text).size().x);
         let label = if c.width() >= tw + 12.0 { full } else { "…" };
         if skin::text_button(&mut b, vec2(c.width(), row_h), Kind::Cream, label, body(14.0))
@@ -160,6 +156,37 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, _inf
 }
 
 type Color = eframe::egui::Color32;
+
+/// Panel header: the channel whose sound is shown, as a dropdown of the project's
+/// channels between ◀ ▶ arrows, to switch channel without leaving the dialog.
+fn channel_picker(ui: &mut Ui, project: &Project, cur: &Channel) -> Option<ChannelId> {
+    let mut pick = None;
+    let ids: Vec<ChannelId> = project.channels.iter().map(|c| c.id).collect();
+    let i = ids.iter().position(|&c| c == cur.id).unwrap_or(0);
+    let n = ids.len();
+    ui.spacing_mut().item_spacing.x = 6.0;
+    // Off the header's clip edge, so the outline shows whole.
+    ui.add_space(2.0);
+    if skin::icon_button(ui, vec2(38.0, 38.0), Kind::Cream, Icon::Prev, 14.0).on_hover_text(tr!("Channel précédent", "Previous channel")).clicked() {
+        pick = Some(ids[(i + n - 1) % n]);
+    }
+    let kind = format!("· {}", cur.kind.label());
+    let w1 = ui.fonts(|f| f.layout_no_wrap(cur.name.clone(), body(15.0), pal().text).size().x);
+    let w2 = ui.fonts(|f| f.layout_no_wrap(kind.clone(), medium(13.0), pal().text).size().x);
+    let w = (w1 + w2 + 12.0 + 18.0 + 6.0 + 30.0).clamp(140.0, (ui.available_width() - 44.0).max(140.0));
+    skin::dropdown(ui, "sound_channel", vec2(w, 38.0), Some((id_color(cur.id.0), true)), &cur.name, Some(&kind), |ui| {
+        skin::menu_caption(ui, "CHANNEL");
+        for c in &project.channels {
+            if skin::menu_item(ui, &c.name, pal().text, c.id == cur.id).clicked() {
+                pick = Some(c.id);
+            }
+        }
+    });
+    if skin::icon_button(ui, vec2(38.0, 38.0), Kind::Cream, Icon::Next, 14.0).on_hover_text(tr!("Channel suivant", "Next channel")).clicked() {
+        pick = Some(ids[(i + 1) % n]);
+    }
+    pick.filter(|&c| c != cur.id)
+}
 
 fn son(st: &mut SeqUi, ui: &mut Ui, c: Rect, row_h: f32, project: &mut Project, id: ChannelId) {
     let p = ui.painter().clone();

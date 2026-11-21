@@ -344,6 +344,13 @@ impl SeqUi {
         }
     }
 
+    /// Settings dialog on the SOUND tab, for `channel` (which becomes the selected one).
+    fn open_sound_settings(&mut self, channel: ChannelId) {
+        self.channel = Some(channel);
+        self.settings_tab = SettingsTab::Sound;
+        self.settings_open = true;
+    }
+
     /// Full screen (compact mode): a single panel, with no bar or tabs.
     fn fullscreen(&self) -> bool {
         self.compact && self.focus.is_some()
@@ -717,18 +724,22 @@ impl SeqUi {
             self.act(UiAction::Stop);
         }
         let rec = self.recording;
-        if skin::button(ui, vec2(56.0, 56.0), Kind::Cream, rec, |p, r, _| {
+        let rec_btn = skin::button(ui, vec2(56.0, 56.0), Kind::Cream, rec, |p, r, c| {
             if rec {
                 skin::led(p, r.center(), 8.0, pal().rec_red, true);
             } else {
                 icons::draw(p, r, 20.0, Icon::Record, pal().rec_red, 1.0);
             }
+            skin::more_mark(p, r, c);
         })
-        .on_hover_text(tr!("Enregistrer le MIDI in dans le pattern courant (mode PAT)", "Record MIDI in into the current pattern (PAT mode)"))
-        .clicked()
-        {
+        .on_hover_text(tr!(
+            "Enregistrer le MIDI in dans le pattern courant (mode PAT)\nClic droit / appui long : décompte, quantification",
+            "Record MIDI in into the current pattern (PAT mode)\nRight-click / long press: count-in, quantize"
+        ));
+        if rec_btn.clicked() {
             self.recording = !self.recording;
         }
+        rec_btn.context_menu(|ui| self.record_options(ui));
         let metro = self.metronome;
         if skin::button(ui, vec2(96.0, 56.0), Kind::Dark, false, |p, r, _| {
             let c = if metro { pal().lcd_green } else { pal().text_dimmer };
@@ -895,6 +906,36 @@ impl SeqUi {
                 ui.memory_mut(|m| m.close_popup());
             }
         });
+    }
+
+    /// Recording options, a right-click / long press on Rec away (also in Settings →
+    /// MIDI & AUDIO).
+    fn record_options(&mut self, ui: &mut egui::Ui) {
+        ui.set_min_width(300.0);
+        skin::menu_caption(ui, tr!("ENREGISTREMENT", "RECORDING"));
+        if skin::menu_toggle(ui, tr!("Décompte (1 mesure)", "Count-in (1 bar)"), self.count_in).clicked() {
+            self.count_in = !self.count_in;
+        }
+        let label = trf!("Quantifier l'enreg. · {}", "Quantize rec. · {}", self.record_grid_label());
+        if skin::menu_toggle(ui, &label, self.quantize)
+            .on_hover_text(tr!("Grille : le SNAP du piano roll", "Grid: the piano roll SNAP"))
+            .clicked()
+        {
+            self.quantize = !self.quantize;
+        }
+    }
+
+    /// Grid of the recorded notes, as shown to the user.
+    fn record_grid_label(&self) -> &'static str {
+        match self.record_grid() {
+            0 | 1 => tr!("Non", "Off"),
+            g if g == PPQ as Tick => "1/4",
+            g if g == PPQ as Tick / 2 => "1/8",
+            STEP => "1/16",
+            g if g == PPQ as Tick / 8 => "1/32",
+            g if g == PPQ as Tick / 6 => tr!("Triol.", "Triplet"),
+            _ => "?",
+        }
     }
 
     /// "Add a channel" menu (rack).
