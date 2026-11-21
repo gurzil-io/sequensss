@@ -374,6 +374,22 @@ pub enum SegStyle {
     Orange,
 }
 
+const SEG_PAD: f32 = 3.0;
+
+fn segment_widths<T>(ui: &Ui, opts: &[(T, Option<Icon>, &str)], min_w: f32, font: &FontId) -> Vec<f32> {
+    opts.iter()
+        .map(|(_, icon, text)| {
+            let tw = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font.clone(), pal().text).size().x);
+            (tw + if icon.is_some() { 22.0 } else { 0.0 } + 24.0).max(min_w)
+        })
+        .collect()
+}
+
+/// Width [`segmented`] takes with these options.
+pub fn segmented_width<T>(ui: &Ui, opts: &[(T, Option<Icon>, &str)], min_w: f32, font: &FontId) -> f32 {
+    segment_widths(ui, opts, min_w, font).iter().sum::<f32>() + 2.0 * (opts.len().saturating_sub(1)) as f32 + 2.0 * SEG_PAD
+}
+
 /// Returns `true` if the value changed.
 pub fn segmented<T: PartialEq + Copy>(
     ui: &mut Ui,
@@ -384,15 +400,9 @@ pub fn segmented<T: PartialEq + Copy>(
     style: SegStyle,
     font: FontId,
 ) -> bool {
-    let pad = 3.0;
-    let widths: Vec<f32> = opts
-        .iter()
-        .map(|(_, icon, text)| {
-            let tw = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font.clone(), pal().text).size().x);
-            (tw + if icon.is_some() { 22.0 } else { 0.0 } + 24.0).max(min_w)
-        })
-        .collect();
-    let total = widths.iter().sum::<f32>() + 2.0 * (opts.len().saturating_sub(1)) as f32 + 2.0 * pad;
+    let pad = SEG_PAD;
+    let widths = segment_widths(ui, opts, min_w, &font);
+    let total = segmented_width(ui, opts, min_w, &font);
     let (rect, _) = ui.allocate_exact_size(vec2(total, h + 2.0 * pad), Sense::hover());
     let p = ui.painter().clone();
     p.rect_filled(rect, 8.0, pal().seg_bg);

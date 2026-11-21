@@ -255,6 +255,18 @@ fn set_selection(sel: &mut Vec<usize>, mut v: Vec<usize>) {
     *sel = v;
 }
 
+/// Snap choices of the piano roll header (value, no icon, label).
+fn snap_options() -> [(Tick, Option<Icon>, &'static str); 6] {
+    [
+        (PPQ as Tick, None, "1/4"),
+        (PPQ as Tick / 2, None, "1/8"),
+        (STEP, None, "1/16"),
+        (PPQ as Tick / 8, None, "1/32"),
+        (PPQ as Tick / 6, None, tr!("Triol.", "Triplet")),
+        (1, None, tr!("Libre", "Free")),
+    ]
+}
+
 /// Light / dark shade of a channel color (note gradient).
 fn note_colors(c: Color32) -> (Color32, Color32, Color32) {
     (mix(c, Color32::WHITE, 0.3), mix(c, Color32::BLACK, 0.08), mix(c, Color32::BLACK, 0.55))
@@ -268,14 +280,6 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             .and_then(|c| project.channel(c))
             .map(|c| (c.name.clone(), id_color(c.id.0)))
             .unwrap_or(("—".into(), pal().seg_on));
-        skin::dropdown(ui, "pr_channel", vec2(150.0, 38.0), Some((color, true)), &cur, None, |ui| {
-            skin::menu_caption(ui, "CHANNEL");
-            for c in &project.channels {
-                if skin::menu_item(ui, &c.name, pal().text, st.channel == Some(c.id)).clicked() {
-                    st.channel = Some(c.id);
-                }
-            }
-        });
         // Small screen: icon-only tools (the brush would not fit otherwise).
         let narrow = ui.available_width() < 1000.0;
         let tools = [
@@ -285,23 +289,56 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             (Tool::Paint, Icon::Brush, tr!("Pinceau", "Paint")),
         ];
         let opts: Vec<(Tool, Option<Icon>, &str)> = tools.iter().map(|&(t, i, l)| (t, Some(i), if narrow { "" } else { l })).collect();
+        let snaps = snap_options();
+        let arp = if st.piano.selected.is_empty() { tr!("Arpéger", "Arpeggiate") } else { tr!("Arpéger la sél.", "Arpeggiate sel.") };
+        let gap = ui.spacing().item_spacing.x;
+        let arp_w = ui.fonts(|f| f.layout_no_wrap(arp.to_string(), body(14.5), pal().text).size().x) + 28.0;
+        let full_w = 150.0
+            + skin::segmented_width(ui, &opts, if narrow { 46.0 } else { 0.0 }, &body(14.0))
+            + 38.0
+            + skin::segmented_width(ui, &snaps, 44.0, &body(14.0))
+            + arp_w
+            + 4.0 * gap;
+        // Docked on a tablet: the snap buttons would be cut off, so the snap becomes a
+        // dropdown (with Arpeggiate in it) and the channel picker gives up some width.
+        let short = ui.available_width() < full_w;
+        let (tool_w, snap_w) = (40.0, 84.0);
+        let tools_w = skin::segmented_width(ui, &opts, tool_w, &body(14.0));
+        let ch_w = if short { (ui.available_width() - tools_w - snap_w - 2.0 * gap).clamp(90.0, 150.0) } else { 150.0 };
+        skin::dropdown(ui, "pr_channel", vec2(ch_w, 38.0), Some((color, true)), &cur, None, |ui| {
+            skin::menu_caption(ui, "CHANNEL");
+            for c in &project.channels {
+                if skin::menu_item(ui, &c.name, pal().text, st.channel == Some(c.id)).clicked() {
+                    st.channel = Some(c.id);
+                }
+            }
+        });
+        if short {
+            skin::segmented(ui, &mut st.piano.tool, &opts, 38.0, tool_w, skin::SegStyle::Orange, body(14.0));
+            let label = snaps.iter().find(|o| o.0 == st.piano.snap).map_or("?", |o| o.2);
+            skin::dropdown(ui, "pr_snap", vec2(snap_w, 38.0), None, label, None, |ui| {
+                skin::menu_caption(ui, "SNAP");
+                for &(v, _, name) in &snaps {
+                    if skin::menu_item(ui, name, pal().text, st.piano.snap == v).clicked() {
+                        st.piano.snap = v;
+                    }
+                }
+                skin::menu_separator(ui);
+                if skin::menu_item(ui, arp, pal().text, false).clicked() {
+                    bake = true;
+                }
+            })
+            .on_hover_text("SNAP");
+            return;
+        }
         skin::segmented(ui, &mut st.piano.tool, &opts, 38.0, if narrow { 46.0 } else { 0.0 }, skin::SegStyle::Orange, body(14.0));
         skin::caption(ui.painter(), ui.cursor().left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, "SNAP", pal().text_dimmer);
         ui.add_space(38.0);
-        skin::segmented(
-            ui,
-            &mut st.piano.snap,
-            &[(PPQ as Tick, None, "1/4"), (PPQ as Tick / 2, None, "1/8"),(STEP, None, "1/16"), (PPQ as Tick / 8, None, "1/32"), (PPQ as Tick / 6, None, tr!("Triol.", "Triplet")), (1, None, tr!("Libre", "Free"))],
-            38.0,
-            44.0,
-            skin::SegStyle::Grey,
-            body(14.0),
-        );
-        let label = if st.piano.selected.is_empty() { tr!("Arpéger", "Arpeggiate") } else { tr!("Arpéger la sél.", "Arpeggiate sel.") };
+        skin::segmented(ui, &mut st.piano.snap, &snaps, 38.0, 44.0, skin::SegStyle::Grey, body(14.0));
         if ui.available_width() > 120.0 {
             skin::spacer_right(ui, 130.0);
         }
-        if skin::auto_button(ui, 44.0, Kind::Cream, label)
+        if skin::auto_button(ui, 44.0, Kind::Cream, arp)
             .on_hover_text(tr!(
                 "Remplace les notes (la sélection, sinon tout) par l'arpège qu'elles produisent, avec les réglages ARP du channel.\n\
                  L'ARP en direct du channel est ensuite désactivé pour ne pas arpéger deux fois.",
