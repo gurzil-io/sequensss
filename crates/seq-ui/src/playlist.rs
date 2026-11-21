@@ -93,7 +93,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let bar = project.bar_len();
     let beat = project.beat_len();
 
-    let res = skin::panel(ui, rect, "TIMELINE", LCD_GREEN, |ui| {
+    let res = skin::panel(ui, rect, "TIMELINE", pal().lcd_green, |ui| {
         let mut s = match st.playlist.snap {
             0 => SnapSel::Bar,
             x if x == STEP => SnapSel::Step,
@@ -108,7 +108,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         }
         let paint = st.playlist.paint;
         if skin::button(ui, vec2(46.0, 38.0), Kind::Dark, paint, |p, r, c| {
-            crate::icons::draw(p, r, 18.0, crate::icons::Icon::Brush, if paint { ORANGE } else { c }, 1.9);
+            crate::icons::draw(p, r, 18.0, crate::icons::Icon::Brush, if paint { pal().orange } else { c }, 1.9);
         })
         .on_hover_text(tr!("Pinceau : glisser depuis un clip pour le copier bout à bout", "Paint: drag from a clip to copy it end to end"))
         .clicked()
@@ -118,13 +118,13 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         if let Some((a, b)) = st.loop_region {
             let text = trf!("Boucle {} → {}", "Loop {} → {}", fmt_bar(a, bar), fmt_bar(b, bar));
             let font = body(14.0);
-            let tw = ui.fonts(|f| f.layout_no_wrap(text.clone(), font.clone(), TEXT).size().x);
+            let tw = ui.fonts(|f| f.layout_no_wrap(text.clone(), font.clone(), pal().text).size().x);
             let (r, resp) = ui.allocate_exact_size(vec2(tw + 46.0, 38.0), Sense::click());
             let p = ui.painter();
-            p.rect_filled(r, 7.0, with_alpha(ORANGE, 36));
-            p.rect_stroke(r, 7.0, Stroke::new(1.0_f32, with_alpha(ORANGE, 128)));
-            p.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, text, font, ORANGE_LIGHT);
-            p.text(pos2(r.right() - 14.0, r.center().y), Align2::CENTER_CENTER, "×", body(20.0), ORANGE);
+            p.rect_filled(r, 7.0, with_alpha(pal().orange, 36));
+            p.rect_stroke(r, 7.0, Stroke::new(1.0_f32, with_alpha(pal().orange, 128)));
+            skin::gtext(&p, pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, text, font, pal().orange_light);
+            skin::gtext(&p, pos2(r.right() - 14.0, r.center().y), Align2::CENTER_CENTER, "×", body(20.0), pal().orange);
             if resp.on_hover_text(tr!("Supprimer la boucle", "Remove loop")).clicked() {
                 st.loop_region = None;
             }
@@ -136,7 +136,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             seq_edit::remove_last_track(project);
         }
         if !st.song_mode {
-            ui.label(egui::RichText::new(tr!("Mode PAT : passe en SONG pour écouter", "PAT mode: switch to SONG to listen")).font(medium(13.0)).color(ORANGE_LIGHT));
+            ui.label(egui::RichText::new(tr!("Mode PAT : passe en SONG pour écouter", "PAT mode: switch to SONG to listen")).font(medium(13.0)).color(pal().orange_light));
         }
         if ui.available_width() > 330.0 {
             skin::spacer_right(ui, 320.0);
@@ -163,7 +163,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let mut tiles: Vec<(PatternId, Rect)> = Vec::new();
     {
         let p = ui.painter();
-        skin::caption(p, palette.left_top() + vec2(0.0, 7.0), Align2::LEFT_CENTER, "PATTERNS", TEXT_DIMMER);
+        skin::caption(p, palette.left_top() + vec2(0.0, 7.0), Align2::LEFT_CENTER, "PATTERNS", pal().text_dimmer);
         let tile_w = (PALETTE_W - 6.0) / 2.0;
         let tile_h = 40.0;
         let rows_avail = ((palette.height() - 18.0 - tile_h - 6.0) / (tile_h + 6.0)).floor().max(1.0) as usize;
@@ -174,10 +174,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             let r = Rect::from_min_size(pos2(palette.left() + (i % 2) as f32 * (tile_w + 6.0), y), vec2(tile_w, tile_h));
             let resp = ui.interact(r, ui.id().with(("pal", pat.id.0)), Sense::click());
             let sel = st.pattern == pat.id;
-            p.rect_filled(r, 7.0, if resp.hovered() { hex(0x2a2420) } else { INNER });
-            p.rect_stroke(r, 7.0, if sel { Stroke::new(2.0_f32, ORANGE) } else { Stroke::new(1.0_f32, EDGE) });
+            p.rect_filled(r, 7.0, if resp.hovered() { pal().ruler } else { pal().inner });
+            p.rect_stroke(r, 7.0, if sel { Stroke::new(2.0_f32, pal().orange) } else { Stroke::new(1.0_f32, pal().edge) });
             p.rect_filled(Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(12.0, 12.0)), 3.0, id_color(pat.id.0));
-            p.with_clip_rect(r.shrink(2.0)).text(pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &pat.name, body(15.0), TEXT);
+            p.with_clip_rect(r.shrink(2.0)).text(pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &pat.name, body(15.0), pal().text);
             let resp = resp.on_hover_text(tr!(
                 "Sélectionner, puis cliquer dans la timeline pour le poser · double-clic : supprimer…",
                 "Select, then click in the timeline to place it · double-click: delete…"
@@ -198,7 +198,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             y += tile_h + 6.0;
         }
         if shown < n {
-            p.text(pos2(palette.left(), y - 2.0), Align2::LEFT_TOP, trf!("+ {} autres (menu du rack)", "+ {} more (rack menu)", n - shown), medium(12.0), TEXT_DIMMER);
+            skin::gtext(&p, pos2(palette.left(), y - 2.0), Align2::LEFT_TOP, trf!("+ {} autres (menu du rack)", "+ {} more (rack menu)", n - shown), medium(12.0), pal().text_dimmer);
             y += 16.0;
         }
         let add = Rect::from_min_size(pos2(palette.left(), y), vec2(PALETTE_W, tile_h));
@@ -210,7 +210,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 
     // --- Arrangement ---
     let p = ui.painter().clone();
-    p.rect_filled(arr, 8.0, INNER);
+    p.rect_filled(arr, 8.0, pal().inner);
     let ruler_bg = Rect::from_min_size(arr.min, vec2(arr.width(), RULER_H));
     let lanes = Rect::from_min_max(pos2(arr.left(), ruler_bg.bottom() + 1.0), pos2(arr.left() + LANE_W, arr.bottom()));
     let ruler = Rect::from_min_max(pos2(lanes.right(), arr.top()), ruler_bg.right_bottom());
@@ -494,7 +494,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let mut toggle_mute = None;
     for tr in 0..tracks {
         let y = y_of(tr);
-        let bg = if tr % 2 == 1 { INNER_ALT } else { INNER };
+        let bg = if tr % 2 == 1 { pal().inner_alt } else { pal().inner };
         gp.rect_filled(Rect::from_min_max(pos2(grid.left(), y), pos2(grid.right(), y + th)), 0.0, if is_muted(tr) { mix(bg, Color32::BLACK, 0.3) } else { bg });
         // Mute button at the start of the lane, like the rack's.
         let row = Rect::from_min_max(pos2(lanes.left(), y), pos2(lanes.right(), y + th));
@@ -510,18 +510,18 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             toggle_mute = Some(tr);
         }
     }
-    vline(&p, lanes.right() - 0.5, lanes.top(), lanes.bottom(), EDGE, 1.0);
+    vline(&p, lanes.right() - 0.5, lanes.top(), lanes.bottom(), pal().edge, 1.0);
     let t0 = tick_of(grid.left());
     let t1 = tick_of(grid.right()) + 1;
     let unit = if (beat as f32 * zoom) >= 10.0 { beat } else { bar };
     let mut t = snap_floor(t0, unit);
     while t <= t1 {
-        let c = if t.is_multiple_of(bar) { hex(0x3a332c) } else { GRIDLINE };
+        let c = if t.is_multiple_of(bar) { pal().bar_line } else { pal().gridline };
         vline(&gp, x_of(t as f64), grid.top(), grid.bottom(), c, 1.0);
         t += unit;
     }
     if let Some((a, b)) = st.loop_region {
-        gp.rect_filled(Rect::from_min_max(pos2(x_of(a as f64), grid.top()), pos2(x_of(b as f64), grid.bottom())), 0.0, with_alpha(ORANGE, 14));
+        gp.rect_filled(Rect::from_min_max(pos2(x_of(a as f64), grid.top()), pos2(x_of(b as f64), grid.bottom())), 0.0, with_alpha(pal().orange, 14));
     }
 
     for (i, c) in clips.iter().enumerate() {
@@ -530,13 +530,13 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             continue;
         }
         // Clips on a muted track are dimmed.
-        let color = if is_muted(c.track) { mix(INNER, id_color(c.pattern.0), 0.4) } else { id_color(c.pattern.0) };
+        let color = if is_muted(c.track) { mix(pal().inner, id_color(c.pattern.0), 0.4) } else { id_color(c.pattern.0) };
         let Some((name, plen, notes)) = pat_info.get(&c.pattern) else { continue };
         let sel = is_sel(i);
-        gp.rect_filled(r, 5.0, mix(INNER, color, if sel { 0.32 } else { 0.18 }));
+        gp.rect_filled(r, 5.0, mix(pal().inner, color, if sel { 0.32 } else { 0.18 }));
         let head = Rect::from_min_size(r.min, vec2(r.width(), 17.0));
         gp.rect_filled(head, egui::Rounding { nw: 5.0, ne: 5.0, sw: 0.0, se: 0.0 }, color);
-        gp.with_clip_rect(head.intersect(grid)).text(pos2(head.left() + 6.0, head.center().y), Align2::LEFT_CENTER, name, bold(12.0), hex(0x161210));
+        gp.with_clip_rect(head.intersect(grid)).text(pos2(head.left() + 6.0, head.center().y), Align2::LEFT_CENTER, name, bold(12.0), pal().track);
         // Note preview, repeated if the clip is longer than the pattern.
         let inner = Rect::from_min_max(pos2(r.left() + 4.0, head.bottom() + 3.0), pos2(r.right() - 4.0, r.bottom() - 3.0));
         if !notes.is_empty() && inner.height() > 6.0 {
@@ -565,19 +565,19 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         gp.rect_stroke(r, 5.0, if sel { Stroke::new(2.0_f32, Color32::WHITE) } else { Stroke::new(1.0_f32, color) });
     }
     if let Some(r) = marquee {
-        gp.rect_filled(r, 0.0, with_alpha(ORANGE, 30));
-        gp.rect_stroke(r, 0.0, Stroke::new(1.0_f32, ORANGE));
+        gp.rect_filled(r, 0.0, with_alpha(pal().orange, 30));
+        gp.rect_stroke(r, 0.0, Stroke::new(1.0_f32, pal().orange));
     }
 
     // Ruler
     let rp = p.with_clip_rect(ruler.intersect(p.clip_rect()));
-    p.rect_filled(ruler_bg, egui::Rounding { nw: 8.0, ne: 8.0, sw: 0.0, se: 0.0 }, RULER);
-    p.line_segment([pos2(ruler_bg.left(), ruler.bottom() + 0.5), pos2(ruler.right(), ruler.bottom() + 0.5)], Stroke::new(1.0_f32, EDGE));
+    p.rect_filled(ruler_bg, egui::Rounding { nw: 8.0, ne: 8.0, sw: 0.0, se: 0.0 }, pal().ruler);
+    p.line_segment([pos2(ruler_bg.left(), ruler.bottom() + 0.5), pos2(ruler.right(), ruler.bottom() + 0.5)], Stroke::new(1.0_f32, pal().edge));
     if let Some((a, b)) = st.loop_region {
         let lr = Rect::from_min_max(pos2(x_of(a as f64).max(ruler.left()), ruler.top()), pos2(x_of(b as f64).min(ruler.right()), ruler.bottom()));
         if lr.width() > 0.0 {
-            rp.rect_filled(lr, 0.0, with_alpha(ORANGE, 46));
-            rp.rect_filled(Rect::from_min_max(pos2(lr.left(), lr.bottom() - 3.0), lr.max), 0.0, ORANGE);
+            rp.rect_filled(lr, 0.0, with_alpha(pal().orange, 46));
+            rp.rect_filled(Rect::from_min_max(pos2(lr.left(), lr.bottom() - 3.0), lr.max), 0.0, pal().orange);
         }
     }
     let label_every = ((40.0 / (bar as f32 * zoom)).ceil() as u64).max(1);
@@ -585,9 +585,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     while b <= t1 {
         let x = x_of(b as f64);
         let n = b / bar;
-        vline(&rp, x, ruler.top(), ruler.bottom(), RULER_LINE, 1.0);
+        vline(&rp, x, ruler.top(), ruler.bottom(), pal().ruler_line, 1.0);
         if n.is_multiple_of(label_every) {
-            rp.text(pos2(x + 6.0, ruler.center().y), Align2::LEFT_CENTER, format!("{}", n + 1), mono(12.0), RULER_TEXT);
+            rp.text(pos2(x + 6.0, ruler.center().y), Align2::LEFT_CENTER, format!("{}", n + 1), mono(12.0), pal().ruler_text);
         }
         b += bar;
     }
@@ -596,11 +596,11 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     if info.playing && st.song_mode {
         let x = x_of(info.playhead);
         if x >= grid.left() && x <= grid.right() {
-            gp.rect_filled(Rect::from_center_size(pos2(x, grid.center().y), vec2(6.0, grid.height())), 0.0, with_alpha(LCD_GREEN, 30));
-            vline(&gp, x, grid.top(), grid.bottom(), LCD_GREEN, 2.0);
+            gp.rect_filled(Rect::from_center_size(pos2(x, grid.center().y), vec2(6.0, grid.height())), 0.0, with_alpha(pal().lcd_green, 30));
+            vline(&gp, x, grid.top(), grid.bottom(), pal().lcd_green, 2.0);
         }
     }
-    p.rect_stroke(arr, 8.0, Stroke::new(1.0_f32, EDGE));
+    p.rect_stroke(arr, 8.0, Stroke::new(1.0_f32, pal().edge));
 
     if let Some(tr) = toggle_mute {
         seq_edit::toggle_track_mute(project, tr);
@@ -654,13 +654,13 @@ fn tap_menu(st: &mut SeqUi, ui: &mut Ui, id: egui::Id, anchor: Rect, project: &m
         ui.set_min_width(260.0);
         skin::menu_caption(ui, &name.to_uppercase());
         if let TapMenu::Clip(i) = menu
-            && skin::menu_item(ui, tr!("Supprimer ce clip", "Delete this clip"), DANGER, false).clicked()
+            && skin::menu_item(ui, tr!("Supprimer ce clip", "Delete this clip"), pal().danger, false).clicked()
         {
             seq_edit::delete_clips(&mut project.arrangement.clips, &[i]);
             done = true;
         }
         match &pattern_item {
-            Some(label) if skin::menu_item(ui, label, DANGER, false).clicked() => {
+            Some(label) if skin::menu_item(ui, label, pal().danger, false).clicked() => {
                 if last {
                     seq_edit::delete_pattern_clips(project, pat);
                 } else {

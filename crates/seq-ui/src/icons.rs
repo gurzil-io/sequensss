@@ -30,6 +30,15 @@ pub enum Icon {
 
 /// Draws `icon` centered in `rect` (size `size` px), stroke width `w` (20-unit grid).
 pub fn draw(p: &Painter, rect: Rect, size: f32, icon: Icon, color: Color32, w: f32) {
+    // Display theme: a wide faint copy first, so the icon glows like a lit segment.
+    if crate::theme::screen() {
+        let halo = crate::theme::with_alpha(color, (color.a() as f32 * 0.18) as u8);
+        draw_raw(p, rect, size, icon, halo, w * 2.6);
+    }
+    draw_raw(p, rect, size, icon, color, w);
+}
+
+fn draw_raw(p: &Painter, rect: Rect, size: f32, icon: Icon, color: Color32, w: f32) {
     let o = rect.center() - vec2(size / 2.0, size / 2.0);
     let k = size / 20.0;
     let pt = |x: f32, y: f32| -> Pos2 { pos2(o.x + x * k, o.y + y * k) };

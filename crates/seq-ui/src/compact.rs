@@ -16,7 +16,7 @@ const H: f32 = 48.0;
 impl SeqUi {
     pub(crate) fn compact_top_bar(&mut self, ui: &mut egui::Ui, rect: Rect, project: &mut Project, info: &PlaybackInfo) {
         let p = ui.painter().clone();
-        skin::bevel(&p, rect, 10.0, BAR_TOP, BAR_BOT, EDGE, Some(BAR_HL));
+        skin::bevel(&p, rect, 10.0, pal().bar_top, pal().bar_bot, pal().edge, Some(pal().bar_hl));
         let mut row = ui.new_child(
             UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
@@ -27,7 +27,7 @@ impl SeqUi {
         let menu_btn = skin::icon_button(ui, vec2(52.0, H), Kind::Cream, Icon::Menu, 22.0);
         self.compact_menu(ui, &menu_btn, project);
         if self.dirty {
-            skin::led(ui.painter(), pos2(menu_btn.rect.right() - 7.0, menu_btn.rect.top() + 7.0), 3.5, ORANGE, false);
+            skin::led(ui.painter(), pos2(menu_btn.rect.right() - 7.0, menu_btn.rect.top() + 7.0), 3.5, pal().orange, false);
         }
 
         // Transport
@@ -43,11 +43,11 @@ impl SeqUi {
         if skin::button(ui, vec2(52.0, H), Kind::Cream, rec, |p, r, _| {
             // Count-in: the beats left (the position display may not fit).
             if count_in > 0 {
-                p.text(r.center(), Align2::CENTER_CENTER, count_in.to_string(), lcd(30.0), REC_RED);
+                skin::gtext(&p, r.center(), Align2::CENTER_CENTER, count_in.to_string(), lcd(30.0), pal().rec_red);
             } else if rec {
-                skin::led(p, r.center(), 8.0, REC_RED, true);
+                skin::led(p, r.center(), 8.0, pal().rec_red, true);
             } else {
-                icons::draw(p, r, 18.0, Icon::Record, REC_RED, 1.0);
+                icons::draw(p, r, 18.0, Icon::Record, pal().rec_red, 1.0);
             }
         })
         .clicked()
@@ -56,9 +56,9 @@ impl SeqUi {
         }
         let metro = self.metronome;
         if skin::button(ui, vec2(52.0, H), Kind::Dark, false, |p, r, _| {
-            let c = if metro { LCD_GREEN } else { TEXT_DIMMER };
+            let c = if metro { pal().lcd_green } else { pal().text_dimmer };
             if metro {
-                p.rect_stroke(r.shrink(1.0), 8.0, Stroke::new(1.0_f32, with_alpha(LCD_GREEN, 90)));
+                p.rect_stroke(r.shrink(1.0), 8.0, Stroke::new(1.0_f32, with_alpha(pal().lcd_green, 90)));
             }
             icons::draw(p, Rect::from_center_size(r.center(), vec2(20.0, 20.0)), 20.0, Icon::Metronome, c, 1.8);
         })
@@ -74,7 +74,7 @@ impl SeqUi {
         if skin::text_button(ui, vec2(38.0, H), Kind::Cream, "−", body(22.0)).clicked() {
             project.tempo_bpm = (project.tempo_bpm - 1.0).round().max(20.0);
         }
-        let bpm = skin::lcd(ui, vec2(90.0, H), "BPM", &format!("{:.1}", project.tempo_bpm), ORANGE_TOP, lcd(32.0), Sense::click_and_drag());
+        let bpm = skin::lcd(ui, vec2(90.0, H), "BPM", &format!("{:.1}", project.tempo_bpm), pal().orange_top, lcd(32.0), Sense::click_and_drag());
         if bpm.dragged() {
             project.tempo_bpm = ((project.tempo_bpm - bpm.drag_delta().y as f64 * 0.25) * 10.0).round() / 10.0;
         }
@@ -115,8 +115,8 @@ impl SeqUi {
         // Master VU meter
         let (mr, _) = ui.allocate_exact_size(vec2(22.0, H), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(mr, 5.0, LCD_BG);
-        p.rect_stroke(mr, 5.0, Stroke::new(1.0_f32, LCD_EDGE));
+        p.rect_filled(mr, 5.0, pal().lcd_bg);
+        p.rect_stroke(mr, 5.0, Stroke::new(1.0_f32, pal().lcd_edge));
         let inner = mr.shrink(3.0);
         let bw = (inner.width() - 2.0) / 2.0;
         skin::meter_bar(p, Rect::from_min_size(inner.min, vec2(bw, inner.height())), info.master.0);
@@ -142,13 +142,13 @@ impl SeqUi {
             let mut chosen = None;
             skin::menu_caption(ui, &trf!("PROJET · {}", "PROJECT · {}", self.file_label.to_uppercase()));
             for (label, a) in [(tr!("Enregistrer", "Save"), UiAction::Save), (tr!("Ouvrir…", "Open…"), UiAction::Open), (tr!("Enregistrer sous…", "Save as…"), UiAction::SaveAs)] {
-                if skin::menu_item(ui, label, TEXT, false).clicked() {
+                if skin::menu_item(ui, label, pal().text, false).clicked() {
                     chosen = Some(a);
                 }
             }
             skin::menu_separator(ui);
             for (label, a) in [(tr!("Exporter en WAV", "Export WAV"), UiAction::ExportWav), (tr!("Exporter en MIDI", "Export MIDI"), UiAction::ExportMidi)] {
-                if skin::menu_item(ui, label, TEXT, false).clicked() {
+                if skin::menu_item(ui, label, pal().text, false).clicked() {
                     chosen = Some(a);
                 }
             }
@@ -182,17 +182,14 @@ impl SeqUi {
             skin::menu_separator(ui);
             skin::menu_caption(ui, tr!("NOUVEAU PROJET", "NEW PROJECT"));
             for (i, kit) in KITS.iter().enumerate() {
-                if skin::menu_item(ui, &format!("Kit {}", kit.name), TEXT, false).clicked() {
+                if skin::menu_item(ui, &format!("Kit {}", kit.name), pal().text, false).clicked() {
                     chosen = Some(UiAction::NewProject(i));
                 }
             }
             skin::menu_separator(ui);
-            if let Some(l) = crate::language_items(ui) {
-                chosen = Some(UiAction::SetLanguage(l));
-            }
-            skin::menu_separator(ui);
-            if let Some(on) = crate::update_toggle(ui, self.check_updates) {
-                chosen = Some(UiAction::SetCheckUpdates(on));
+            if skin::menu_item(ui, tr!("Réglages…", "Settings…"), pal().text, false).clicked() {
+                self.settings_open = true;
+                ui.memory_mut(|m| m.close_popup());
             }
             ui.add_space(6.0);
             if let Some(a) = chosen {
@@ -224,7 +221,7 @@ impl SeqUi {
                 (tr!("Tout sélectionner", "Select all"), EditCmd::SelectAll),
                 (tr!("Désélectionner", "Deselect"), EditCmd::Deselect),
             ] {
-                if skin::menu_item(ui, label, TEXT, false).clicked() {
+                if skin::menu_item(ui, label, pal().text, false).clicked() {
                     self.edit_cmd = Some((editor, cmd));
                     self.active_editor = editor;
                 }
@@ -241,7 +238,7 @@ impl SeqUi {
                 let gap = 10.0;
                 let (bg, _) = ui.allocate_exact_size(vec2(4.0 * 52.0 + 2.0 * 4.0 + gap + 12.0, 52.0 + 12.0), Sense::hover());
                 ui.painter().rect_filled(bg.translate(vec2(0.0, 4.0)), 12.0, egui::Color32::from_black_alpha(90));
-                ui.painter().rect_filled(bg, 12.0, with_alpha(BAR_BOT, 235));
+                ui.painter().rect_filled(bg, 12.0, with_alpha(pal().bar_bot, 235));
                 let mut row = ui.new_child(UiBuilder::new().max_rect(bg.shrink(6.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
                 row.spacing_mut().item_spacing.x = 4.0;
                 row.add_enabled_ui(self.can_undo, |ui| {
@@ -268,13 +265,11 @@ impl SeqUi {
     /// Bottom tabs: one panel at a time.
     pub(crate) fn tab_bar(&mut self, ui: &mut egui::Ui, rect: Rect) {
         let p = ui.painter().clone();
-        skin::bevel(&p, rect, 10.0, BAR_TOP, BAR_BOT, EDGE, Some(BAR_HL));
+        skin::bevel(&p, rect, 10.0, pal().bar_top, pal().bar_bot, pal().edge, Some(pal().bar_hl));
         let tabs = [
-            (PanelId::Timeline, "TIMELINE", LCD_GREEN),
-            (PanelId::Rack, "RACK", ORANGE),
-            (PanelId::Piano, "PIANO ROLL", YELLOW),
-            (PanelId::Sound, tr!("SON", "SOUND"), ORANGE),
-            (PanelId::Midi, "MIDI & AUDIO", RED),
+            (PanelId::Timeline, "TIMELINE", pal().lcd_green),
+            (PanelId::Rack, "RACK", pal().orange),
+            (PanelId::Piano, "PIANO ROLL", pal().yellow),
         ];
         let inner = rect.shrink(4.0);
         let gap = 4.0;
@@ -284,14 +279,14 @@ impl SeqUi {
             let resp = ui.interact(r, ui.id().with(("tab", i)), Sense::click());
             let on = self.tab == id;
             if on {
-                p.rect_filled(r, 7.0, ORANGE);
+                p.rect_filled(r, 7.0, pal().orange);
             } else if resp.is_pointer_button_down_on() {
                 p.rect_filled(r, 7.0, egui::Color32::from_white_alpha(14));
             }
-            let fg = if on { ON_ORANGE } else { TEXT_DIM };
+            let fg = if on { pal().on_orange } else { pal().text_dim };
             let g = p.layout_no_wrap(label.to_string(), cond(16.0), fg);
             let x0 = r.center().x - (g.size().x + 16.0) / 2.0;
-            skin::led(&p, pos2(x0 + 4.0, r.center().y), 4.0, if on { ON_ORANGE } else { led }, !on);
+            skin::led(&p, pos2(x0 + 4.0, r.center().y), 4.0, if on { pal().on_orange } else { led }, !on);
             p.galley(pos2(x0 + 16.0, r.center().y - g.size().y / 2.0), g, fg);
             if resp.clicked() {
                 // Applied at the end of the frame: otherwise the new panel, drawn right after,

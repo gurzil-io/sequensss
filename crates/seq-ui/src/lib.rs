@@ -1,6 +1,6 @@
-//! "Sequens Retro" egui interface: transport bar, timeline, channel rack,
-//! piano roll, sound settings, MIDI & audio, all on one screen, each panel
-//! can be expanded.
+//! Sequensss egui interface: transport bar, timeline, channel rack and piano roll on one
+//! screen, each panel can be expanded. Sound, MIDI & audio and general preferences are
+//! in the Settings dialog (≡ menu).
 //!
 //! Small screen (phone, < `COMPACT_W` × `COMPACT_H` points): compact mode, condensed top
 //! bar, one panel at a time picked with tabs at the bottom.
@@ -57,6 +57,8 @@ pub enum UiAction {
     RefreshDevices,
     /// Interface language (applied and remembered by the app).
     SetLanguage(seq_i18n::Lang),
+    /// Switch the look (remembered by the app).
+    SetTheme(theme::Theme),
     /// "Check for updates" setting (remembered by the app).
     SetCheckUpdates(bool),
     /// Open a web page (release notes) in the system browser.
@@ -78,8 +80,21 @@ fn language_items(ui: &mut egui::Ui) -> Option<seq_i18n::Lang> {
     let cur = seq_i18n::get();
     let mut chosen = None;
     for l in seq_i18n::Lang::ALL {
-        if skin::menu_item(ui, l.native_name(), TEXT, l == cur).clicked() && l != cur {
+        if skin::menu_item(ui, l.native_name(), pal().text, l == cur).clicked() && l != cur {
             chosen = Some(l);
+        }
+    }
+    chosen
+}
+
+/// "Theme" section of the menus.
+fn theme_items(ui: &mut egui::Ui) -> Option<theme::Theme> {
+    skin::menu_caption(ui, tr!("THÈME", "THEME"));
+    let cur = theme::get();
+    let mut chosen = None;
+    for t in theme::Theme::ALL {
+        if skin::menu_item(ui, t.label(), pal().text, t == cur).clicked() && t != cur {
+            chosen = Some(t);
         }
     }
     chosen
@@ -88,9 +103,9 @@ fn language_items(ui: &mut egui::Ui) -> Option<seq_i18n::Lang> {
 /// Position display; during the count-in, the beats left instead.
 fn position_lcd(ui: &mut egui::Ui, size: egui::Vec2, pos: &str, count_in: u32, font: egui::FontId) {
     if count_in > 0 {
-        skin::lcd(ui, size, tr!("DÉCOMPTE", "COUNT-IN"), &format!("- {count_in} -"), REC_RED, font, Sense::hover());
+        skin::lcd(ui, size, tr!("DÉCOMPTE", "COUNT-IN"), &format!("- {count_in} -"), pal().rec_red, font, Sense::hover());
     } else {
-        skin::lcd(ui, size, "POSITION", pos, LCD_GREEN, font, Sense::hover());
+        skin::lcd(ui, size, "POSITION", pos, pal().lcd_green, font, Sense::hover());
     }
 }
 
@@ -104,8 +119,15 @@ pub enum PanelId {
     Timeline,
     Rack,
     Piano,
+}
+
+/// Sections of the Settings dialog.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SettingsTab {
+    /// Sound of the selected channel.
     Sound,
     Midi,
+    General,
 }
 
 /// Below this screen size (egui points), compact mode. The desktop window has a
@@ -176,6 +198,9 @@ pub struct SeqUi {
     pub can_undo: bool,
     pub can_redo: bool,
     pub focus: Option<PanelId>,
+    /// Settings dialog (opened from the ≡ menu) and its current section.
+    pub settings_open: bool,
+    pub settings_tab: SettingsTab,
     /// Channels whose sample is loading (filled by the app every frame).
     pub loading: HashSet<ChannelId>,
     /// Compact mode (recomputed every frame) and the panel shown in that mode.
@@ -204,6 +229,8 @@ pub struct SeqUi {
     pub browser: Option<browser::Browser>,
     /// "Check for updates" setting (mirrored by the app).
     pub check_updates: bool,
+    /// Theme whose egui style is installed (restyled when it changes).
+    applied_theme: Option<theme::Theme>,
     /// Newer version available (set by the app, cleared when closed).
     pub update: Option<UpdateNotice>,
     actions: Vec<UiAction>,
@@ -229,6 +256,8 @@ impl SeqUi {
             can_undo: false,
             can_redo: false,
             focus: None,
+            settings_open: false,
+            settings_tab: SettingsTab::Sound,
             loading: HashSet::new(),
             compact: false,
             tab: PanelId::Rack,
@@ -248,6 +277,7 @@ impl SeqUi {
             rack: rack::RackState::default(),
             browser: None,
             check_updates: true,
+            applied_theme: None,
             update: None,
             actions: Vec::new(),
             shown_status: String::new(),
@@ -352,18 +382,22 @@ impl SeqUi {
 
     pub fn show(&mut self, ctx: &egui::Context, project: &mut Project, info: &PlaybackInfo) -> Vec<UiAction> {
         self.fix_selection(project);
+        if self.applied_theme != Some(theme::get()) {
+            theme::apply(ctx);
+            self.applied_theme = Some(theme::get());
+        }
         let screen = ctx.screen_rect();
         self.compact = screen.width() < COMPACT_W || screen.height() < COMPACT_H;
         self.shortcuts(ctx);
 
-        egui::CentralPanel::default().frame(egui::Frame::none().fill(BG)).show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::none().fill(pal().bg)).show(ctx, |ui| {
             let full = ui.max_rect();
             // Wooden side panels.
             let small_bar = self.compact || full.width() < FULL_BAR_W;
             let (wood_w, margin, gap) = if self.compact { (8.0, 12.0, 6.0) } else { (14.0, 22.0, 8.0) };
             let bar_h = if small_bar { 60.0 } else { 72.0 };
             let p = ui.painter();
-            let wood = [(0.0, WOOD_DARK), (6.0 / 14.0, WOOD_MID), (1.0, WOOD)];
+            let wood = [(0.0, pal().wood_dark), (6.0 / 14.0, pal().wood_mid), (1.0, pal().wood)];
             skin::hgradient(p, Rect::from_min_size(full.min, vec2(wood_w, full.height())), &wood);
             let wood_r: Vec<(f32, Color32)> = wood.iter().rev().map(|&(t, c)| (1.0 - t, c)).collect();
             skin::hgradient(p, Rect::from_min_size(pos2(full.right() - wood_w, full.top()), vec2(wood_w, full.height())), &wood_r);
@@ -395,8 +429,6 @@ impl SeqUi {
                     PanelId::Timeline => playlist::show(self, &mut pu, rect, project, info),
                     PanelId::Rack => rack::show(self, &mut pu, rect, project, info),
                     PanelId::Piano => piano::show(self, &mut pu, rect, project, info),
-                    PanelId::Sound => sound::show(self, &mut pu, rect, project, info),
-                    PanelId::Midi => midi_panel::show(self, &mut pu, rect, project),
                 }
             }
         });
@@ -408,6 +440,10 @@ impl SeqUi {
         self.browser_window(ctx);
         self.update_notice(ctx);
         self.toast(ctx);
+        self.settings_dialog(ctx, project, info);
+        if theme::screen() {
+            screen_overlay(ctx);
+        }
 
         let pointer_down = ctx.input(|i| i.pointer.primary_down() || i.pointer.secondary_down());
         if !pointer_down {
@@ -435,23 +471,97 @@ impl SeqUi {
         if let Some(f) = self.focus {
             return vec![(f, grid)];
         }
+        // Timeline across the top, rack and piano roll side by side below
+        // (sound and MIDI settings live in the Settings dialog).
         let gap = 8.0;
         let w = grid.width() - gap;
         let left_w = w * 900.0 / 1892.0;
-        let h = grid.height() - 2.0 * gap;
-        // Medium screen (tablet): taller bottom row (Sound / MIDI unreadable otherwise),
-        // the timeline gives up some room. Large screen: mockup proportions.
-        let (r1, r2) = if grid.width() < FULL_BAR_W - 44.0 { (h * 0.22, h * 0.43) } else { (h * 256.0 / 964.0, h * 452.0 / 964.0) };
+        let r1 = (grid.height() - gap) * 0.36;
         let y1 = grid.top() + r1 + gap;
-        let y2 = y1 + r2 + gap;
         let x1 = grid.left() + left_w + gap;
         vec![
             (PanelId::Timeline, Rect::from_min_max(grid.min, pos2(grid.right(), grid.top() + r1))),
-            (PanelId::Rack, Rect::from_min_max(pos2(grid.left(), y1), pos2(x1 - gap, y1 + r2))),
-            (PanelId::Piano, Rect::from_min_max(pos2(x1, y1), pos2(grid.right(), y1 + r2))),
-            (PanelId::Sound, Rect::from_min_max(pos2(grid.left(), y2), pos2(x1 - gap, grid.bottom()))),
-            (PanelId::Midi, Rect::from_min_max(pos2(x1, y2), grid.max)),
+            (PanelId::Rack, Rect::from_min_max(pos2(grid.left(), y1), pos2(x1 - gap, grid.bottom()))),
+            (PanelId::Piano, Rect::from_min_max(pos2(x1, y1), grid.max)),
         ]
+    }
+
+    /// Settings dialog: sound of the selected channel, MIDI & audio, general preferences.
+    /// Modal: the app behind is dimmed; a tap outside, ✕ or Escape closes it.
+    fn settings_dialog(&mut self, ctx: &egui::Context, project: &mut Project, info: &PlaybackInfo) {
+        if !self.settings_open {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
+        egui::Area::new(egui::Id::new("settings_backdrop")).order(egui::Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
+            let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
+            ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(170));
+            close |= resp.clicked();
+        });
+        let margin = if self.compact { 8.0 } else { 36.0 };
+        // About the height of the old bottom panel row, so the sections keep their proportions.
+        let size = vec2((screen.width() - 2.0 * margin).min(1200.0), (screen.height() - 2.0 * margin).min(560.0));
+        let rect = Rect::from_center_size(screen.center(), size);
+        let area = egui::Area::new(egui::Id::new("settings_dialog")).order(egui::Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            let p = ui.painter().clone();
+            p.rect_filled(rect, 12.0, pal().bg);
+            p.rect_stroke(rect, 12.0, Stroke::new(1.0_f32, pal().edge));
+
+            // Header: title, sections, close.
+            let head = Rect::from_min_size(rect.min + vec2(16.0, 10.0), vec2(rect.width() - 32.0, 52.0));
+            let tw = skin::gtext(&p, head.left_center(), Align2::LEFT_CENTER, tr!("RÉGLAGES", "SETTINGS"), theme::title_font(16.0), pal().header_text).width();
+            let mut hu = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(Rect::from_min_max(pos2(head.left() + tw + 24.0, head.top()), head.max))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            let mut tab = self.settings_tab;
+            skin::segmented(
+                &mut hu,
+                &mut tab,
+                &[(SettingsTab::Sound, None, tr!("SON", "SOUND")), (SettingsTab::Midi, None, "MIDI & AUDIO"), (SettingsTab::General, None, tr!("GÉNÉRAL", "GENERAL"))],
+                40.0,
+                110.0,
+                skin::SegStyle::Orange,
+                cond(17.0),
+            );
+            self.settings_tab = tab;
+            skin::spacer_right(&mut hu, 44.0);
+            close |= skin::icon_button(&mut hu, vec2(44.0, 44.0), Kind::Cream, Icon::Close, 18.0)
+                .on_hover_text(tr!("Fermer", "Close"))
+                .clicked();
+
+            let body = Rect::from_min_max(pos2(rect.left() + 12.0, head.bottom() + 10.0), rect.max - vec2(12.0, 12.0));
+            let mut bu = ui.new_child(UiBuilder::new().max_rect(body));
+            match self.settings_tab {
+                SettingsTab::Sound => sound::show(self, &mut bu, body, project, info),
+                SettingsTab::Midi => midi_panel::show(self, &mut bu, body, project),
+                SettingsTab::General => self.general_settings(&mut bu, body),
+            }
+        });
+        ctx.move_to_top(area.response.layer_id);
+        if close {
+            self.settings_open = false;
+        }
+    }
+
+    /// "General" section: language, theme, update check.
+    fn general_settings(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let col = Rect::from_min_size(rect.min + vec2(8.0, 4.0), vec2(rect.width().min(460.0), rect.height()));
+        let mut cu = ui.new_child(UiBuilder::new().max_rect(col).layout(egui::Layout::top_down(egui::Align::Min)));
+        if let Some(l) = language_items(&mut cu) {
+            self.act(UiAction::SetLanguage(l));
+        }
+        skin::menu_separator(&mut cu);
+        if let Some(t) = theme_items(&mut cu) {
+            self.act(UiAction::SetTheme(t));
+        }
+        skin::menu_separator(&mut cu);
+        if let Some(on) = update_toggle(&mut cu, self.check_updates) {
+            self.act(UiAction::SetCheckUpdates(on));
+        }
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -530,14 +640,14 @@ impl SeqUi {
             .interactable(false)
             .show(ctx, |ui| {
                 let font = body(15.0);
-                let g = ui.fonts(|f| f.layout_no_wrap(self.shown_status.clone(), font.clone(), TEXT));
+                let g = ui.fonts(|f| f.layout_no_wrap(self.shown_status.clone(), font.clone(), pal().text));
                 let (rect, _) = ui.allocate_exact_size(g.size() + vec2(36.0, 20.0), Sense::hover());
                 let p = ui.painter();
                 p.rect_filled(rect.translate(vec2(0.0, 6.0)), 10.0, Color32::from_black_alpha((110.0 * alpha) as u8));
-                p.rect_filled(rect, 10.0, with_alpha(POPUP, (245.0 * alpha) as u8));
-                p.rect_stroke(rect, 10.0, Stroke::new(1.0_f32, with_alpha(ORANGE, (200.0 * alpha) as u8)));
-                skin::led(p, pos2(rect.left() + 14.0, rect.center().y), 4.0, with_alpha(ORANGE, (255.0 * alpha) as u8), true);
-                p.text(pos2(rect.left() + 26.0, rect.center().y), Align2::LEFT_CENTER, &self.shown_status, font, with_alpha(TEXT, (255.0 * alpha) as u8));
+                p.rect_filled(rect, 10.0, with_alpha(pal().popup, (245.0 * alpha) as u8));
+                p.rect_stroke(rect, 10.0, Stroke::new(1.0_f32, with_alpha(pal().orange, (200.0 * alpha) as u8)));
+                skin::led(p, pos2(rect.left() + 14.0, rect.center().y), 4.0, with_alpha(pal().orange, (255.0 * alpha) as u8), true);
+                skin::gtext(&p, pos2(rect.left() + 26.0, rect.center().y), Align2::LEFT_CENTER, &self.shown_status, font, with_alpha(pal().text, (255.0 * alpha) as u8));
             });
     }
 
@@ -547,7 +657,7 @@ impl SeqUi {
 
     fn top_bar(&mut self, ui: &mut egui::Ui, rect: Rect, project: &mut Project, info: &PlaybackInfo) {
         let p = ui.painter().clone();
-        skin::bevel(&p, rect, 10.0, BAR_TOP, BAR_BOT, EDGE, Some(BAR_HL));
+        skin::bevel(&p, rect, 10.0, pal().bar_top, pal().bar_bot, pal().edge, Some(pal().bar_hl));
         let mut row = ui.new_child(
             UiBuilder::new().max_rect(rect.shrink2(vec2(12.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
@@ -556,13 +666,13 @@ impl SeqUi {
 
         // Logo
         let (logo, _) = ui.allocate_exact_size(vec2(196.0, 56.0), Sense::hover());
-        p.text(pos2(logo.left(), logo.center().y - 9.0), Align2::LEFT_CENTER, "SEQUENS", michroma(24.0), ORANGE);
+        skin::gtext(&p, pos2(logo.left(), logo.center().y - 9.0), Align2::LEFT_CENTER, "SEQUENS", title_font(24.0), pal().orange);
         let file = format!("RHYTHM COMPOSER · {}", self.file_label);
-        let g = p.layout_no_wrap(file, medium(12.0), TEXT_DIM);
+        let g = p.layout_no_wrap(file, medium(12.0), pal().text_dim);
         let gw = g.size().x.min(logo.width() - 12.0);
-        p.with_clip_rect(logo).galley(pos2(logo.left(), logo.center().y + 7.0), g, TEXT_DIM);
+        p.with_clip_rect(logo).galley(pos2(logo.left(), logo.center().y + 7.0), g, pal().text_dim);
         if self.dirty {
-            skin::led(&p, pos2(logo.left() + gw + 7.0, logo.center().y + 14.0), 3.5, ORANGE, false);
+            skin::led(&p, pos2(logo.left() + gw + 7.0, logo.center().y + 14.0), 3.5, pal().orange, false);
         }
 
         // File + save
@@ -584,9 +694,9 @@ impl SeqUi {
         let rec = self.recording;
         if skin::button(ui, vec2(56.0, 56.0), Kind::Cream, rec, |p, r, _| {
             if rec {
-                skin::led(p, r.center(), 8.0, REC_RED, true);
+                skin::led(p, r.center(), 8.0, pal().rec_red, true);
             } else {
-                icons::draw(p, r, 20.0, Icon::Record, REC_RED, 1.0);
+                icons::draw(p, r, 20.0, Icon::Record, pal().rec_red, 1.0);
             }
         })
         .on_hover_text(tr!("Enregistrer le MIDI in dans le pattern courant (mode PAT)", "Record MIDI in into the current pattern (PAT mode)"))
@@ -596,12 +706,12 @@ impl SeqUi {
         }
         let metro = self.metronome;
         if skin::button(ui, vec2(96.0, 56.0), Kind::Dark, false, |p, r, _| {
-            let c = if metro { LCD_GREEN } else { TEXT_DIMMER };
+            let c = if metro { pal().lcd_green } else { pal().text_dimmer };
             if metro {
-                p.rect_stroke(r.shrink(1.0), 8.0, Stroke::new(1.0_f32, with_alpha(LCD_GREEN, 90)));
+                p.rect_stroke(r.shrink(1.0), 8.0, Stroke::new(1.0_f32, with_alpha(pal().lcd_green, 90)));
             }
             icons::draw(p, Rect::from_center_size(pos2(r.left() + 24.0, r.center().y), vec2(20.0, 20.0)), 20.0, Icon::Metronome, c, 1.8);
-            p.text(pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, tr!("Métro", "Metro"), body(15.0), c);
+            skin::gtext(&p, pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, tr!("Métro", "Metro"), body(15.0), c);
         })
         .on_hover_text(tr!("Métronome", "Metronome"))
         .clicked()
@@ -625,13 +735,13 @@ impl SeqUi {
         // BPM
         ui.spacing_mut().item_spacing.x = 3.0;
         if skin::button(ui, vec2(44.0, 56.0), Kind::Cream, false, |p, r, c| {
-            p.text(r.center(), Align2::CENTER_CENTER, "−", body(24.0), c);
+            skin::gtext(&p, r.center(), Align2::CENTER_CENTER, "−", body(24.0), c);
         })
         .clicked()
         {
             project.tempo_bpm = (project.tempo_bpm - 1.0).round().max(20.0);
         }
-        let bpm = skin::lcd(ui, vec2(104.0, 56.0), "BPM", &format!("{:.1}", project.tempo_bpm), ORANGE_TOP, lcd(40.0), Sense::click_and_drag())
+        let bpm = skin::lcd(ui, vec2(104.0, 56.0), "BPM", &format!("{:.1}", project.tempo_bpm), pal().orange_top, lcd(40.0), Sense::click_and_drag())
             .on_hover_text(tr!("Glisser verticalement pour régler (Maj : précis) · molette", "Drag vertically to adjust (Shift: fine) · wheel"));
         if bpm.dragged() {
             let fine = ui.input(|i| i.modifiers.shift);
@@ -645,7 +755,7 @@ impl SeqUi {
             }
         }
         if skin::button(ui, vec2(44.0, 56.0), Kind::Cream, false, |p, r, c| {
-            p.text(r.center(), Align2::CENTER_CENTER, "+", body(24.0), c);
+            skin::gtext(&p, r.center(), Align2::CENTER_CENTER, "+", body(24.0), c);
         })
         .clicked()
         {
@@ -660,8 +770,8 @@ impl SeqUi {
             ui.set_width(150.0);
             ui.spacing_mut().item_spacing.y = 4.0;
             let (lr, _) = ui.allocate_exact_size(vec2(150.0, 14.0), Sense::hover());
-            skin::caption(ui.painter(), lr.left_center(), Align2::LEFT_CENTER, "SWING", TEXT_DIM);
-            ui.painter().text(lr.right_center(), Align2::RIGHT_CENTER, format!("{:.0} %", project.swing * 100.0), medium(12.0), TEXT);
+            skin::caption(ui.painter(), lr.left_center(), Align2::LEFT_CENTER, "SWING", pal().text_dim);
+            ui.painter().text(lr.right_center(), Align2::RIGHT_CENTER, format!("{:.0} %", project.swing * 100.0), medium(12.0), pal().text);
             skin::metal_slider(ui, &mut project.swing, 150.0).on_hover_text(tr!("Double-clic : 0 %", "Double-click: 0 %"));
         });
         ui.add_space(4.0);
@@ -669,8 +779,8 @@ impl SeqUi {
         // Time signature
         let sig = format!("{}/{}", project.time_sig.0, project.time_sig.1);
         let sig_btn = skin::button(ui, vec2(78.0, 56.0), Kind::Dark, false, |p, r, _| {
-            skin::caption(p, pos2(r.left() + 14.0, r.top() + 14.0), Align2::LEFT_CENTER, tr!("MESURE", "TIME SIG."), LCD_LABEL);
-            p.text(pos2(r.left() + 14.0, r.center().y + 8.0), Align2::LEFT_CENTER, &sig, mono(22.0), TEXT);
+            skin::caption(p, pos2(r.left() + 14.0, r.top() + 14.0), Align2::LEFT_CENTER, tr!("MESURE", "TIME SIG."), pal().lcd_label);
+            skin::gtext(&p, pos2(r.left() + 14.0, r.center().y + 8.0), Align2::LEFT_CENTER, &sig, mono(22.0), pal().text);
         });
         let sig_id = ui.make_persistent_id("sig_popup");
         if sig_btn.clicked() {
@@ -717,8 +827,8 @@ impl SeqUi {
         // Master VU meter
         let (mr, _) = ui.allocate_exact_size(vec2(30.0, 52.0), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(mr, 6.0, LCD_BG);
-        p.rect_stroke(mr, 6.0, Stroke::new(1.0_f32, LCD_EDGE));
+        p.rect_filled(mr, 6.0, pal().lcd_bg);
+        p.rect_stroke(mr, 6.0, Stroke::new(1.0_f32, pal().lcd_edge));
         let inner = mr.shrink(4.0);
         skin::meter_bar(p, Rect::from_min_size(inner.min + vec2(1.5, 0.0), vec2(8.0, inner.height())), info.master.0);
         skin::meter_bar(p, Rect::from_min_size(inner.min + vec2(11.5, 0.0), vec2(8.0, inner.height())), info.master.1);
@@ -733,7 +843,7 @@ impl SeqUi {
             ui.set_min_width(260.0);
             skin::menu_caption(ui, tr!("NOUVEAU PROJET", "NEW PROJECT"));
             for (i, kit) in KITS.iter().enumerate() {
-                if skin::menu_item(ui, &format!("Kit {}", kit.name), TEXT, false).clicked() {
+                if skin::menu_item(ui, &format!("Kit {}", kit.name), pal().text, false).clicked() {
                     self.act(UiAction::NewProject(i));
                 }
             }
@@ -743,24 +853,21 @@ impl SeqUi {
                 (tr!("Enregistrer          Ctrl+S", "Save                 Ctrl+S"), UiAction::Save),
                 (tr!("Enregistrer sous…", "Save as…"), UiAction::SaveAs),
             ] {
-                if skin::menu_item(ui, label, TEXT, false).clicked() {
+                if skin::menu_item(ui, label, pal().text, false).clicked() {
                     self.act(a);
                 }
             }
             skin::menu_separator(ui);
-            if skin::menu_item(ui, tr!("Exporter en WAV…", "Export WAV…"), TEXT, false).clicked() {
+            if skin::menu_item(ui, tr!("Exporter en WAV…", "Export WAV…"), pal().text, false).clicked() {
                 self.act(UiAction::ExportWav);
             }
-            if skin::menu_item(ui, tr!("Exporter en MIDI…", "Export MIDI…"), TEXT, false).clicked() {
+            if skin::menu_item(ui, tr!("Exporter en MIDI…", "Export MIDI…"), pal().text, false).clicked() {
                 self.act(UiAction::ExportMidi);
             }
             skin::menu_separator(ui);
-            if let Some(l) = language_items(ui) {
-                self.act(UiAction::SetLanguage(l));
-            }
-            skin::menu_separator(ui);
-            if let Some(on) = update_toggle(ui, self.check_updates) {
-                self.act(UiAction::SetCheckUpdates(on));
+            if skin::menu_item(ui, tr!("Réglages…", "Settings…"), pal().text, false).clicked() {
+                self.settings_open = true;
+                ui.memory_mut(|m| m.close_popup());
             }
         });
     }
@@ -774,17 +881,17 @@ impl SeqUi {
             ui.memory_mut(|m| m.close_popup());
         }
         skin::menu_separator(ui);
-        if skin::menu_item(ui, tr!("Sampler (fichier WAV)…", "Sampler (WAV file)…"), TEXT, false).clicked() {
+        if skin::menu_item(ui, tr!("Sampler (fichier WAV)…", "Sampler (WAV file)…"), pal().text, false).clicked() {
             self.act(UiAction::LoadSample(None));
         }
-        if skin::menu_item(ui, tr!("Synthé", "Synth"), TEXT, false).clicked() {
+        if skin::menu_item(ui, tr!("Synthé", "Synth"), pal().text, false).clicked() {
             let id = project.add_channel("Synth", ChannelKind::Synth(SynthParams::default()));
             if let Some(id) = id {
                 project.channel_mut(id).unwrap().default_key = 48;
             }
             self.after_add(id);
         }
-        if skin::menu_item(ui, "MIDI out", TEXT, false).clicked() {
+        if skin::menu_item(ui, "MIDI out", pal().text, false).clicked() {
             let id = project.add_channel("MIDI out", ChannelKind::MidiOut { channel: 0, out: 0 });
             self.after_add(id);
         }
@@ -806,12 +913,12 @@ fn drum_grid(ui: &mut egui::Ui, current: Option<Drum>) -> Option<Drum> {
             let (r, resp) = ui.allocate_exact_size(vec2(150.0, 34.0), Sense::click());
             let p = ui.painter();
             if current == Some(d) {
-                p.rect_filled(r, 6.0, TILE_SEL);
-                p.rect_filled(Rect::from_min_size(r.left_top() + vec2(0.0, 7.0), vec2(3.0, r.height() - 14.0)), 1.5, ORANGE);
+                p.rect_filled(r, 6.0, pal().tile_sel);
+                p.rect_filled(Rect::from_min_size(r.left_top() + vec2(0.0, 7.0), vec2(3.0, r.height() - 14.0)), 1.5, pal().orange);
             } else if resp.hovered() {
-                p.rect_filled(r, 6.0, hex(0x433a32));
+                p.rect_filled(r, 6.0, pal().hover_row);
             }
-            p.text(pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, d.name(), body(14.5), TEXT);
+            skin::gtext(&p, pos2(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, d.name(), body(14.5), pal().text);
             if resp.clicked() {
                 picked = Some(d);
             }
@@ -824,9 +931,26 @@ fn drum_grid(ui: &mut egui::Ui, current: Option<Drum>) -> Option<Drum> {
 }
 
 /// Engraved vertical separator.
+/// Display theme: faint scanlines and a darker rim, painted over everything (input passes through).
+fn screen_overlay(ctx: &egui::Context) {
+    let rect = ctx.screen_rect();
+    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("screen_overlay")));
+    let line = Stroke::new(1.0_f32, Color32::from_black_alpha(26));
+    let mut y = rect.top() + 1.5;
+    while y < rect.bottom() {
+        p.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)], line);
+        y += 3.0;
+    }
+    for i in 0..16 {
+        let w = 3.0;
+        let a = (48.0 * (1.0 - i as f32 / 16.0).powi(2)) as u8;
+        p.rect_stroke(rect.shrink(i as f32 * w + w / 2.0), 18.0, Stroke::new(w, Color32::from_black_alpha(a)));
+    }
+}
+
 fn groove(ui: &mut egui::Ui) {
     let (r, _) = ui.allocate_exact_size(vec2(4.0, 44.0), Sense::hover());
     let p = ui.painter();
-    p.line_segment([pos2(r.center().x, r.top()), pos2(r.center().x, r.bottom())], Stroke::new(1.0_f32, GROOVE));
-    p.line_segment([pos2(r.center().x + 1.0, r.top()), pos2(r.center().x + 1.0, r.bottom())], Stroke::new(1.0_f32, BAR_HL));
+    p.line_segment([pos2(r.center().x, r.top()), pos2(r.center().x, r.bottom())], Stroke::new(1.0_f32, pal().groove));
+    p.line_segment([pos2(r.center().x + 1.0, r.top()), pos2(r.center().x + 1.0, r.bottom())], Stroke::new(1.0_f32, pal().bar_hl));
 }

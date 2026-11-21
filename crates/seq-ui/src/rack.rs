@@ -93,14 +93,14 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let bar = project.bar_len();
     let pat_id = st.pattern;
 
-    let res = skin::panel(ui, rect, "CHANNEL RACK", ORANGE, |ui| {
+    let res = skin::panel(ui, rect, "CHANNEL RACK", pal().orange, |ui| {
         // Current pattern + pattern management.
         let (name, color) = project.pattern(pat_id).map(|p| (p.name.clone(), id_color(p.id.0))).unwrap_or_default();
         skin::dropdown(ui, "rack_pat", vec2(170.0, 38.0), Some((color, false)), &name, None, |ui| {
             skin::menu_caption(ui, "PATTERNS");
             let mut pick = None;
             for p in &project.patterns {
-                if skin::menu_item(ui, &p.name, TEXT, p.id == st.pattern).clicked() {
+                if skin::menu_item(ui, &p.name, pal().text, p.id == st.pattern).clicked() {
                     pick = Some(p.id);
                 }
             }
@@ -108,20 +108,20 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 st.pattern = p;
             }
             skin::menu_separator(ui);
-            if skin::menu_item(ui, tr!("+ Nouveau pattern", "+ New pattern"), TEXT, false).clicked() {
+            if skin::menu_item(ui, tr!("+ Nouveau pattern", "+ New pattern"), pal().text, false).clicked() {
                 st.pattern = seq_edit::new_pattern(project);
             }
-            if skin::menu_item(ui, tr!("Cloner", "Clone"), TEXT, false).clicked()
+            if skin::menu_item(ui, tr!("Cloner", "Clone"), pal().text, false).clicked()
                 && let Some(id) = seq_edit::clone_pattern(project, st.pattern)
             {
                 st.pattern = id;
             }
-            if skin::menu_item(ui, tr!("Renommer…", "Rename…"), TEXT, false).clicked() {
+            if skin::menu_item(ui, tr!("Renommer…", "Rename…"), pal().text, false).clicked() {
                 st.renaming_pattern = Some((st.pattern, name.clone()));
             }
             if project.patterns.len() <= 1 {
                 skin::menu_disabled(ui, tr!("Dernier pattern, impossible à supprimer", "Last pattern, can't be deleted"));
-            } else if skin::menu_item(ui, tr!("Supprimer", "Delete"), DANGER, false).clicked() {
+            } else if skin::menu_item(ui, tr!("Supprimer", "Delete"), pal().danger, false).clicked() {
                 seq_edit::delete_pattern(project, st.pattern);
             }
         });
@@ -146,9 +146,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 _ => trf!("{} pas", "{} steps", len.div_ceil(STEP)),
             };
             let font = body(14.0);
-            let w = ui.fonts(|f| f.layout_no_wrap(label.clone(), font.clone(), TEXT).size().x).max(40.0) + 4.0;
+            let w = ui.fonts(|f| f.layout_no_wrap(label.clone(), font.clone(), pal().text).size().x).max(40.0) + 4.0;
             let (r, _) = ui.allocate_exact_size(vec2(w, 38.0), Sense::hover());
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, label, font, TEXT);
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, label, font, pal().text);
             if skin::text_button(ui, vec2(32.0, 38.0), Kind::Dark, "+", body(20.0))
                 .on_hover_text(tr!("Ajouter une mesure (ou peindre après la fin du pattern)", "Add a bar (or paint past the end of the pattern)"))
                 .clicked()
@@ -229,8 +229,17 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             let s_rect = m_rect.translate(vec2(49.0, 0.0));
             for (r, label, on, tag) in [(m_rect, "M", ch.mute, 0u8), (s_rect, "S", ch.solo, 1u8)] {
                 let resp = ui.interact(r, ui.id().with(("ms", ch.id.0, tag)), Sense::click());
-                let fg = skin::paint_button(&p, r, 7.0, Kind::Tile, on, resp.is_pointer_button_down_on(), resp.hovered(), true);
-                p.text(r.center(), Align2::CENTER_CENTER, label, cond(17.0), fg);
+                let fg = if screen() {
+                    // Display: bare red letters, framed when on.
+                    let red = pal().red;
+                    if on {
+                        p.rect_stroke(r.shrink(6.0), 6.0, Stroke::new(1.5_f32, red));
+                    }
+                    if on { red } else { with_alpha(red, if resp.hovered() { 230 } else { 170 }) }
+                } else {
+                    skin::paint_button(&p, r, 7.0, Kind::Tile, on, resp.is_pointer_button_down_on(), resp.hovered(), true)
+                };
+                skin::gtext(&p, r.center(), Align2::CENTER_CENTER, label, cond(17.0), fg);
                 if resp.clicked() {
                     let c = project.channels[i].make_mut();
                     if tag == 0 {
@@ -246,22 +255,41 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             let tile = Rect::from_min_size(row.min + vec2(98.0, 0.0), vec2(156.0, 44.0));
             let selected = st.channel == Some(ch.id);
             let tresp = ui.interact(tile, ui.id().with(("tile", ch.id.0)), Sense::click());
-            p.rect_filled(tile, 7.0, if selected { TILE_SEL } else if tresp.hovered() { hex(0x40372f) } else { TILE });
-            p.rect_stroke(tile, 7.0, if selected { Stroke::new(2.0_f32, ORANGE) } else { Stroke::new(1.0_f32, EDGE) });
+            let screen = screen();
+            if screen {
+                // Display: a frame in the channel color, brighter and glowing when selected.
+                if selected {
+                    skin::glow(&p, tile, 9.0, color, 6.0);
+                }
+                p.rect_filled(tile, 9.0, if tresp.hovered() { pal().hover_channel } else { pal().bg });
+                p.rect_stroke(tile, 9.0, Stroke::new(if selected { 2.5_f32 } else { 1.5 }, with_alpha(color, if selected { 255 } else { 170 })));
+            } else {
+                p.rect_filled(tile, 7.0, if selected { pal().tile_sel } else if tresp.hovered() { pal().hover_channel } else { pal().tile });
+                p.rect_stroke(tile, 7.0, if selected { Stroke::new(2.0_f32, pal().orange) } else { Stroke::new(1.0_f32, pal().edge) });
+            }
             // Sample loading: blinking LED, dimmed name.
             let loading = st.loading.contains(&ch.id);
             let blink = loading && (ui.input(|i| i.time) * 4.0) as i64 % 2 == 1;
-            skin::led(&p, pos2(tile.left() + 16.0, tile.center().y), 6.0, if blink { with_alpha(color, 60) } else { color }, !blink);
+            if !screen {
+                skin::led(&p, pos2(tile.left() + 16.0, tile.center().y), 6.0, if blink { with_alpha(color, 60) } else { color }, !blink);
+            }
             if loading {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(125));
             }
-            let name_color = if ch.mute || loading { with_alpha(TEXT, 115) } else { TEXT };
-            p.with_clip_rect(tile.shrink(2.0)).text(pos2(tile.left() + 31.0, tile.center().y), Align2::LEFT_CENTER, &ch.name, body(16.0), name_color);
+            if screen {
+                // Display: the name in capitals, centered, in the channel color (blinks while loading).
+                let dim = ch.mute || blink;
+                let name_color = with_alpha(color, if dim { 110 } else { 255 });
+                skin::gtext(&p.with_clip_rect(tile.shrink(3.0)), tile.center(), Align2::CENTER_CENTER, ch.name.to_uppercase(), body(17.0), name_color);
+            } else {
+                let name_color = if ch.mute || loading { with_alpha(pal().text, 115) } else { pal().text };
+                p.with_clip_rect(tile.shrink(2.0)).text(pos2(tile.left() + 31.0, tile.center().y), Align2::LEFT_CENTER, &ch.name, body(16.0), name_color);
+            }
             let lvl = info.levels.get(&ch.id).map(|l| l.0.max(l.1)).unwrap_or(0.0);
             let frac = ((20.0 * lvl.max(1e-6).log10() + 48.0) / 48.0).clamp(0.0, 1.0);
             if frac > 0.0 {
                 let lr = Rect::from_min_size(pos2(tile.left() + 1.0, tile.bottom() - 4.0), vec2((tile.width() - 2.0) * frac, 3.0));
-                skin::hgradient(&p, lr, &[(0.0, METER_GREEN), (1.0, METER_YELLOW)]);
+                skin::hgradient(&p, lr, &[(0.0, pal().meter_green), (1.0, pal().meter_yellow)]);
             }
             if tresp.clicked() {
                 st.channel = Some(ch.id);
@@ -283,21 +311,21 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                     replace_items(st, ui, project, &ch);
                     return;
                 }
-                if skin::menu_item(ui, tr!("Ouvrir dans le piano roll", "Open in piano roll"), TEXT, false).clicked() {
+                if skin::menu_item(ui, tr!("Ouvrir dans le piano roll", "Open in piano roll"), pal().text, false).clicked() {
                     st.channel = Some(ch.id);
                     st.active_editor = Editor::Piano;
                     st.show_panel(PanelId::Piano);
                     ui.close_menu();
                 }
-                if skin::menu_item(ui, tr!("Renommer…", "Rename…"), TEXT, false).clicked() {
+                if skin::menu_item(ui, tr!("Renommer…", "Rename…"), pal().text, false).clicked() {
                     st.renaming_channel = Some((ch.id, ch.name.clone()));
                     ui.close_menu();
                 }
-                if skin::menu_item(ui, tr!("Dupliquer", "Duplicate"), TEXT, false).clicked() {
+                if skin::menu_item(ui, tr!("Dupliquer", "Duplicate"), pal().text, false).clicked() {
                     op = Some(RowOp::Duplicate(ch.id));
                     ui.close_menu();
                 }
-                if skin::menu_item(ui, tr!("Remplacer par…", "Replace with…"), TEXT, false).clicked() {
+                if skin::menu_item(ui, tr!("Remplacer par…", "Replace with…"), pal().text, false).clicked() {
                     st.replacing = Some(ch.id);
                 }
                 note_clipboard_items(st, ui, project, pat_id, ch.id);
@@ -314,7 +342,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                     }
                 });
                 skin::menu_separator(ui);
-                if skin::menu_item(ui, tr!("Supprimer", "Delete"), DANGER, false).clicked() {
+                if skin::menu_item(ui, tr!("Supprimer", "Delete"), pal().danger, false).clicked() {
                     op = Some(RowOp::Delete(ch.id));
                     ui.close_menu();
                 }
@@ -333,7 +361,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         ui.add_space(4.0);
         let add = skin::button(ui, vec2(254.0, 40.0), Kind::Ghost, false, |p, r, c| {
             crate::icons::draw(p, Rect::from_center_size(pos2(r.center().x - 70.0, r.center().y), vec2(18.0, 18.0)), 18.0, Icon::PlusCircle, c, 2.0);
-            p.text(pos2(r.center().x - 54.0, r.center().y), Align2::LEFT_CENTER, tr!("Ajouter un channel", "Add channel"), body(14.5), c);
+            skin::gtext(&p, pos2(r.center().x - 54.0, r.center().y), Align2::LEFT_CENTER, tr!("Ajouter un channel", "Add channel"), body(14.5), c);
         });
         let add_id = ui.make_persistent_id("add_channel_menu");
         if add.clicked() {
@@ -399,7 +427,7 @@ fn note_clipboard_items(st: &mut SeqUi, ui: &mut Ui, project: &mut Project, pat:
 /// Channel menu, "Replace with" page: another instrument for the channel, which keeps
 /// its notes and settings (the current one is highlighted).
 fn replace_items(st: &mut SeqUi, ui: &mut Ui, project: &mut Project, ch: &Channel) {
-    if skin::menu_item(ui, tr!("‹ Retour", "‹ Back"), TEXT_DIM, false).clicked() {
+    if skin::menu_item(ui, tr!("‹ Retour", "‹ Back"), pal().text_dim, false).clicked() {
         st.replacing = None;
     }
     skin::menu_caption(ui, tr!("REMPLACER PAR", "REPLACE WITH"));
@@ -416,16 +444,16 @@ fn replace_items(st: &mut SeqUi, ui: &mut Ui, project: &mut Project, ch: &Channe
         }
         skin::menu_separator(ui);
         let is_file = matches!(ch.kind, ChannelKind::Sampler { source: SampleSource::File(_) });
-        if skin::menu_item(ui, tr!("Fichier WAV…", "WAV file…"), TEXT, is_file).clicked() {
+        if skin::menu_item(ui, tr!("Fichier WAV…", "WAV file…"), pal().text, is_file).clicked() {
             st.act(UiAction::LoadSample(Some(ch.id)));
             st.replacing = None;
             ui.close_menu();
         }
         // Synth / MIDI out: the settings this channel had last time, if any.
-        if skin::menu_item(ui, tr!("Synthé", "Synth"), TEXT, matches!(ch.kind, ChannelKind::Synth(_))).clicked() {
+        if skin::menu_item(ui, tr!("Synthé", "Synth"), pal().text, matches!(ch.kind, ChannelKind::Synth(_))).clicked() {
             kind = Some(ch.recall(ChannelKind::Synth(SynthParams::default())));
         }
-        if skin::menu_item(ui, "MIDI out", TEXT, matches!(ch.kind, ChannelKind::MidiOut { .. })).clicked() {
+        if skin::menu_item(ui, "MIDI out", pal().text, matches!(ch.kind, ChannelKind::MidiOut { .. })).clicked() {
             kind = Some(ch.recall(ChannelKind::MidiOut { channel: 0, out: 0 }));
         }
     });
@@ -469,7 +497,7 @@ fn steps_row(
         if cr.left() > area.right() {
             break;
         }
-        let off_bg = if (i / 4) % 2 == 1 { STEP_OFF_B } else { STEP_OFF_A };
+        let off_bg = if (i / 4) % 2 == 1 { pal().step_off_b } else { pal().step_off_a };
         match step_vel(pat, ch, i) {
             Some(v) => {
                 let fill = if v >= 100 { color } else { mix(off_bg, color, 0.72) };
@@ -495,7 +523,7 @@ fn steps_row(
     if c.steps > 0 {
         let x = (cell(c.steps - 1).right() + cell(c.steps).left()) / 2.0;
         if area.x_range().contains(x) {
-            crate::widgets::vline(&p, x, area.top() - 2.0, area.bottom() + 2.0, with_alpha(ORANGE, 170), 2.0);
+            crate::widgets::vline(&p, x, area.top() - 2.0, area.bottom() + 2.0, with_alpha(pal().orange, 170), 2.0);
         }
     }
 
@@ -537,13 +565,13 @@ fn note_preview(
     let notes = pat.notes.get(&ch).map(Vec::as_slice).unwrap_or_default();
     let len = pat.length.max(1);
     let resp = ui.interact(area, ui.id().with(("preview", ch.0)), Sense::click());
-    p.rect_filled(area, 6.0, STEP_OFF_A);
+    p.rect_filled(area, 6.0, pal().step_off_a);
     // Beat bands, like the step groups.
     let beats = len.div_ceil(4 * STEP);
     let x_of = |t: Tick| area.left() + t as f32 / len as f32 * area.width();
     for b in (1..beats).step_by(2) {
         let r = Rect::from_min_max(pos2(x_of(b * 4 * STEP), area.top()), pos2(x_of(((b + 1) * 4 * STEP).min(len)), area.bottom()));
-        p.rect_filled(r, 0.0, STEP_OFF_B);
+        p.rect_filled(r, 0.0, pal().step_off_b);
     }
     let inner = area.shrink2(vec2(2.0, 4.0));
     let (lo, hi) = seq_edit::preview_keys(notes, 12);
@@ -576,14 +604,14 @@ fn hscroll(st: &mut SeqUi, ui: &mut Ui, rect: Rect, c: &Cols, pointer: &Pointer,
     let last = ((c.sx + c.view) / c.offset(c.spb).max(1.0)).ceil().max(1.0) as usize;
     let p = ui.painter();
     let label = if first >= last { trf!("MES. {}", "BAR {}", first) } else { trf!("MES. {}–{}", "BARS {}–{}", first, last) };
-    skin::caption(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, &label, TEXT_DIMMER);
+    skin::caption(p, pos2(rect.left() + 2.0, rect.center().y), Align2::LEFT_CENTER, &label, pal().text_dimmer);
 
     let k = track.width() / c.content().max(1.0);
     let x_of = |off: f32| track.left() + off * k;
-    p.rect_filled(track, 5.0, INNER);
+    p.rect_filled(track, 5.0, pal().inner);
     if c.steps > 0 {
         let end = x_of(c.offset(c.steps - 1) + c.cw);
-        p.rect_filled(Rect::from_min_max(track.min, pos2(end, track.bottom())), 5.0, with_alpha(ORANGE, 45));
+        p.rect_filled(Rect::from_min_max(track.min, pos2(end, track.bottom())), 5.0, with_alpha(pal().orange, 45));
     }
     for b in 1..c.total.div_ceil(c.spb) {
         let x = x_of(c.offset(b * c.spb)) - BGAP * k / 2.0;

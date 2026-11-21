@@ -697,6 +697,11 @@ impl App {
                 self.settings.lang = Some(lang);
                 self.save_settings();
             }
+            UiAction::SetTheme(t) => {
+                seq_ui::theme::set(t);
+                self.settings.theme = Some(t);
+                self.save_settings();
+            }
             UiAction::SetCheckUpdates(on) => {
                 self.settings.check_updates = on;
                 self.ui.check_updates = on;
@@ -856,6 +861,7 @@ pub fn run(options: eframe::NativeOptions, path: Option<PathBuf>, files: Files, 
         .or_else(|| locale.as_deref().map(seq_i18n::Lang::from_locale))
         .unwrap_or(seq_i18n::Lang::Fr);
     seq_i18n::set(lang);
+    seq_ui::theme::set(settings.theme.unwrap_or(seq_ui::theme::Theme::Retro));
     eframe::run_native(
         "Sequensss",
         options,

@@ -52,7 +52,7 @@ impl SeqUi {
                 });
                 ui.add_space(8.0);
                 if b.projects.is_empty() {
-                    ui.label(egui::RichText::new(tr!("Aucun projet enregistré.", "No saved project.")).font(body(15.0)).color(TEXT_DIMMER));
+                    ui.label(egui::RichText::new(tr!("Aucun projet enregistré.", "No saved project.")).font(body(15.0)).color(pal().text_dimmer));
                 }
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 6.0;
@@ -61,15 +61,15 @@ impl SeqUi {
                         let (row, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
                         let is_current = current.trim_end_matches(".ron") == name;
                         let p = ui.painter();
-                        p.rect_filled(row, 8.0, if resp.is_pointer_button_down_on() { hex(0x3a322b) } else { INNER });
-                        p.rect_stroke(row, 8.0, if is_current { Stroke::new(2.0_f32, ORANGE) } else { Stroke::new(1.0_f32, EDGE) });
+                        p.rect_filled(row, 8.0, if resp.is_pointer_button_down_on() { pal().tile } else { pal().inner });
+                        p.rect_stroke(row, 8.0, if is_current { Stroke::new(2.0_f32, pal().orange) } else { Stroke::new(1.0_f32, pal().edge) });
                         // Buttons on the right: share, delete.
                         let del = Rect::from_min_size(pos2(row.right() - 6.0 - 44.0, row.top() + 4.0), vec2(44.0, 44.0));
                         let confirming = b.confirm_delete.as_deref() == Some(name.as_str());
                         let del = if confirming { Rect::from_min_max(pos2(del.right() - 120.0, del.top()), del.max) } else { del };
                         let share = Rect::from_min_size(pos2(del.left() - 6.0 - 110.0, row.top() + 4.0), vec2(110.0, 44.0));
                         let text_r = Rect::from_min_max(pos2(row.left() + 14.0, row.top()), pos2(share.left() - 8.0, row.bottom()));
-                        p.with_clip_rect(text_r).text(text_r.left_center(), Align2::LEFT_CENTER, &name, body(17.0), TEXT);
+                        p.with_clip_rect(text_r).text(text_r.left_center(), Align2::LEFT_CENTER, &name, body(17.0), pal().text);
 
                         let mut su = ui.new_child(UiBuilder::new().max_rect(share));
                         let share_clicked = skin::text_button(&mut su, share.size(), Kind::Cream, tr!("Partager", "Share"), body(14.0)).clicked();

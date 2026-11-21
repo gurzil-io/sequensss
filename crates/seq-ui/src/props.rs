@@ -14,7 +14,7 @@ pub fn windows(st: &mut SeqUi, ctx: &egui::Context, project: &mut Project) {
 }
 
 fn window<'a>(title: String, id: &str) -> egui::Window<'a> {
-    egui::Window::new(egui::RichText::new(title).font(michroma(13.0)).color(HEADER_TEXT))
+    egui::Window::new(egui::RichText::new(title).font(title_font(13.0)).color(pal().header_text))
         .id(egui::Id::new(id))
         .resizable(false)
         .collapsible(false)
@@ -195,7 +195,7 @@ fn arp_params(ui: &mut egui::Ui, p: &mut ArpParams) {
             "Applies live to everything the channel plays: pattern, MIDI keyboard, piano roll keyboard."
         ))
             .font(medium(13.0))
-            .color(TEXT_DIMMER),
+            .color(pal().text_dimmer),
     );
 }
 

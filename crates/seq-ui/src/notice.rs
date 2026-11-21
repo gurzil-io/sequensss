@@ -30,18 +30,18 @@ impl SeqUi {
             .anchor(Align2::RIGHT_BOTTOM, offset)
             .show(ctx, |ui| {
                 egui::Frame::none()
-                    .fill(POPUP)
+                    .fill(pal().popup)
                     .rounding(10.0)
-                    .stroke(Stroke::new(1.0_f32, ORANGE))
+                    .stroke(Stroke::new(1.0_f32, pal().orange))
                     .inner_margin(egui::Margin::symmetric(10.0, 6.0))
                     .shadow(egui::Shadow { offset: vec2(0.0, 6.0), blur: 12.0, spread: 0.0, color: egui::Color32::from_black_alpha(110) })
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             let (led, _) = ui.allocate_exact_size(vec2(12.0, H), Sense::hover());
-                            skin::led(ui.painter(), led.center(), 4.0, ORANGE, true);
+                            skin::led(ui.painter(), led.center(), 4.0, pal().orange, true);
                             let text = trf!("Version {} disponible", "Version {} available", n.version);
-                            ui.label(egui::RichText::new(text).font(body(15.0)).color(TEXT));
+                            ui.label(egui::RichText::new(text).font(body(15.0)).color(pal().text));
                             ui.add_space(4.0);
                             view = skin::auto_button(ui, H, Kind::Orange, tr!("Voir", "View")).on_hover_text(&n.url).clicked();
                             skip = skin::auto_button(ui, H, Kind::Cream, tr!("Ignorer cette version", "Skip this version")).clicked();

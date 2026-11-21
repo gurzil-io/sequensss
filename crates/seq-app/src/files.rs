@@ -59,6 +59,8 @@ impl Files {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub lang: Option<seq_i18n::Lang>,
+    /// Chosen look (Retro by default).
+    pub theme: Option<seq_ui::theme::Theme>,
     /// Check GitHub for a newer release at startup (on by default).
     pub check_updates: bool,
     /// Last successful update check (Unix seconds).
@@ -75,6 +77,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             lang: None,
+            theme: None,
             check_updates: true,
             last_update_check: None,
             skipped_version: None,
@@ -97,6 +100,7 @@ impl Settings {
             let (key, value) = line.split_once('=').map(|(k, v)| (k.trim(), v.trim())).unwrap_or((line.trim(), ""));
             match key {
                 "lang" => s.lang = seq_i18n::Lang::from_code(value),
+                "theme" => s.theme = seq_ui::theme::Theme::from_code(value),
                 "check_updates" => s.check_updates = value != "0",
                 "last_update_check" => s.last_update_check = value.parse().ok(),
                 "skipped_version" => s.skipped_version = (!value.is_empty()).then(|| value.to_string()),
@@ -113,6 +117,9 @@ impl Settings {
         let mut text = String::new();
         if let Some(l) = self.lang {
             text.push_str(&format!("lang={}\n", l.code()));
+        }
+        if let Some(t) = self.theme {
+            text.push_str(&format!("theme={}\n", t.code()));
         }
         text.push_str(&format!("check_updates={}\n", u8::from(self.check_updates)));
         if let Some(t) = self.last_update_check {
@@ -149,6 +156,7 @@ mod tests {
     fn old_file_with_only_lang_loads() {
         let s = Settings::parse("lang=en\n");
         assert_eq!(s.lang, Some(Lang::En));
+        assert_eq!(s.theme, None);
         assert!(s.check_updates);
         assert_eq!(s.last_update_check, None);
         assert_eq!(s.skipped_version, None);
@@ -159,6 +167,7 @@ mod tests {
     fn round_trip_keeps_every_key() {
         let s = Settings {
             lang: Some(Lang::Fr),
+            theme: Some(seq_ui::theme::Theme::Display),
             check_updates: false,
             last_update_check: Some(1_700_000_000),
             skipped_version: Some("0.2.0".into()),

@@ -262,16 +262,16 @@ fn note_colors(c: Color32) -> (Color32, Color32, Color32) {
 
 pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info: &PlaybackInfo) {
     let mut bake = false;
-    let res = skin::panel(ui, rect, "PIANO ROLL", YELLOW, |ui| {
+    let res = skin::panel(ui, rect, "PIANO ROLL", pal().yellow, |ui| {
         let (cur, color) = st
             .channel
             .and_then(|c| project.channel(c))
             .map(|c| (c.name.clone(), id_color(c.id.0)))
-            .unwrap_or(("—".into(), SEG_ON));
+            .unwrap_or(("—".into(), pal().seg_on));
         skin::dropdown(ui, "pr_channel", vec2(150.0, 38.0), Some((color, true)), &cur, None, |ui| {
             skin::menu_caption(ui, "CHANNEL");
             for c in &project.channels {
-                if skin::menu_item(ui, &c.name, TEXT, st.channel == Some(c.id)).clicked() {
+                if skin::menu_item(ui, &c.name, pal().text, st.channel == Some(c.id)).clicked() {
                     st.channel = Some(c.id);
                 }
             }
@@ -286,7 +286,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         ];
         let opts: Vec<(Tool, Option<Icon>, &str)> = tools.iter().map(|&(t, i, l)| (t, Some(i), if narrow { "" } else { l })).collect();
         skin::segmented(ui, &mut st.piano.tool, &opts, 38.0, if narrow { 46.0 } else { 0.0 }, skin::SegStyle::Orange, body(14.0));
-        skin::caption(ui.painter(), ui.cursor().left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, "SNAP", TEXT_DIMMER);
+        skin::caption(ui.painter(), ui.cursor().left_center() + vec2(2.0, 0.0), Align2::LEFT_CENTER, "SNAP", pal().text_dimmer);
         ui.add_space(38.0);
         skin::segmented(
             ui,
@@ -325,7 +325,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         r
     });
     let Some(ch) = st.channel.filter(|c| project.channel(*c).is_some()) else {
-        ui.painter().text(area.center(), Align2::CENTER_CENTER, tr!("Aucun channel", "No channel"), body(16.0), TEXT_DIMMER);
+        ui.painter().text(area.center(), Align2::CENTER_CENTER, tr!("Aucun channel", "No channel"), body(16.0), pal().text_dimmer);
         return;
     };
     let pat_id = st.pattern;
@@ -862,7 +862,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 
     // --- Drawing ---
     let p = ui.painter();
-    p.rect_filled(roll, 8.0, GRID_BG);
+    p.rect_filled(roll, 8.0, pal().grid_bg);
     let gp = ui.painter_at(grid);
     for key in 0..=127u8 {
         let y = y_of(key);
@@ -870,8 +870,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             continue;
         }
         let row = Rect::from_min_max(pos2(grid.left(), y), pos2(grid.right(), y + kh));
-        gp.rect_filled(row, 0.0, if is_black_key(key) { ROW_BLACK } else { ROW_WHITE });
-        hline(&gp, y + kh - 0.5, grid.left(), grid.right(), ROW_LINE, 1.0);
+        gp.rect_filled(row, 0.0, if is_black_key(key) { pal().row_black } else { pal().row_white });
+        hline(&gp, y + kh - 0.5, grid.left(), grid.right(), pal().row_line, 1.0);
     }
     let t0 = tick_of(grid.left()) as Tick;
     let t1 = tick_of(grid.right()) as Tick + 1;
@@ -879,12 +879,18 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let mut t = snap_floor(t0, line_unit);
     while t <= t1 {
         let x = x_of(t as f64);
-        if t.is_multiple_of(bar) {
-            vline(&gp, x, grid.top(), grid.bottom(), Color32::from_black_alpha(170), 2.5);
-        } else if t.is_multiple_of(beat) {
-            vline(&gp, x, grid.top(), grid.bottom(), Color32::from_black_alpha(140), 2.0);
+        // Display: black lines vanish on the black screen, so they take the amber grid colors.
+        let (bar_c, beat_c, step_c) = if screen() {
+            (pal().bar_line, pal().ruler_line, pal().gridline)
         } else {
-            vline(&gp, x, grid.top(), grid.bottom(), Color32::from_black_alpha(64), 1.0);
+            (Color32::from_black_alpha(170), Color32::from_black_alpha(140), Color32::from_black_alpha(64))
+        };
+        if t.is_multiple_of(bar) {
+            vline(&gp, x, grid.top(), grid.bottom(), bar_c, 2.5);
+        } else if t.is_multiple_of(beat) {
+            vline(&gp, x, grid.top(), grid.bottom(), beat_c, 2.0);
+        } else {
+            vline(&gp, x, grid.top(), grid.bottom(), step_c, 1.0);
         }
         t += line_unit.max(1);
     }
@@ -892,7 +898,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let end_x = x_of(pat_len as f64);
     if end_x < grid.right() {
         gp.rect_filled(Rect::from_min_max(pos2(end_x.max(grid.left()), grid.top()), grid.right_bottom()), 0.0, Color32::from_black_alpha(110));
-        vline(&gp, end_x, grid.top(), grid.bottom(), with_alpha(ORANGE, 160), 2.0);
+        vline(&gp, end_x, grid.top(), grid.bottom(), with_alpha(pal().orange, 160), 2.0);
     }
     for (i, n) in notes.iter().enumerate() {
         let r = note_rect(n);
@@ -900,7 +906,18 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             continue;
         }
         let k = 0.55 + 0.45 * (n.velocity as f32 / 127.0);
-        let (top, bot) = (mix(GRID_BG, note_top, k), mix(GRID_BG, note_bot, k));
+        if screen() {
+            // Display: a lit outline over a dim fill, brighter with velocity.
+            let sel = is_sel(i);
+            let c = if sel { pal().white } else { color };
+            gp.rect_filled(r, 3.0, with_alpha(color, (40.0 * k) as u8));
+            gp.rect_stroke(r, 3.0, Stroke::new(if sel { 2.0_f32 } else { 1.5 }, with_alpha(c, (255.0 * k) as u8)));
+            if r.width() > 34.0 && kh >= 12.0 {
+                skin::gtext(&gp, pos2(r.left() + 6.0, r.center().y), Align2::LEFT_CENTER, key_name(n.key), bold(11.0), c);
+            }
+            continue;
+        }
+        let (top, bot) = (mix(pal().grid_bg, note_top, k), mix(pal().grid_bg, note_bot, k));
         skin::vgradient(&gp, r, 4.0, top, bot);
         gp.line_segment([pos2(r.left() + 3.0, r.top() + 1.0), pos2(r.right() - 3.0, r.top() + 1.0)], Stroke::new(1.0_f32, Color32::from_white_alpha(100)));
         if r.width() > 14.0 {
@@ -913,24 +930,24 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         }
     }
     if let Some(r) = marquee {
-        gp.rect_filled(r, 0.0, with_alpha(ORANGE, 30));
-        gp.rect_stroke(r, 0.0, Stroke::new(1.0_f32, ORANGE));
+        gp.rect_filled(r, 0.0, with_alpha(pal().orange, 30));
+        gp.rect_stroke(r, 0.0, Stroke::new(1.0_f32, pal().orange));
     }
     // Playhead, above the notes: a dark outline keeps it visible on any note color.
     if let Some(ph) = playhead {
         let x = x_of(ph);
         if x >= grid.left() && x <= grid.right() {
-            gp.rect_filled(Rect::from_center_size(pos2(x, grid.center().y), vec2(10.0, grid.height())), 0.0, with_alpha(LCD_GREEN, 40));
+            gp.rect_filled(Rect::from_center_size(pos2(x, grid.center().y), vec2(10.0, grid.height())), 0.0, with_alpha(pal().lcd_green, 40));
             vline(&gp, x, grid.top(), grid.bottom(), Color32::from_black_alpha(160), 5.0);
-            vline(&gp, x, grid.top(), grid.bottom(), LCD_GREEN, 2.5);
+            vline(&gp, x, grid.top(), grid.bottom(), pal().lcd_green, 2.5);
             let top = grid.top();
-            gp.add(egui::Shape::convex_polygon(vec![pos2(x - 6.0, top), pos2(x + 6.0, top), pos2(x, top + 8.0)], LCD_GREEN, Stroke::new(1.0_f32, Color32::from_black_alpha(160))));
+            gp.add(egui::Shape::convex_polygon(vec![pos2(x - 6.0, top), pos2(x + 6.0, top), pos2(x, top + 8.0)], pal().lcd_green, Stroke::new(1.0_f32, Color32::from_black_alpha(160))));
         }
     }
 
     // Keyboard
     let kp = ui.painter_at(kb);
-    kp.rect_filled(kb, 0.0, KEYBOARD_BG);
+    kp.rect_filled(kb, 0.0, pal().keyboard_bg);
     for key in 0..=127u8 {
         let y = y_of(key);
         if y > kb.bottom() || y + kh < kb.top() {
@@ -938,24 +955,32 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         }
         let r = Rect::from_min_max(pos2(kb.left(), y), pos2(kb.right(), y + kh));
         let pressed = pressed_key == Some(key);
-        if is_black_key(key) {
-            kp.rect_filled(r, 0.0, if pressed { ORANGE_LIGHT } else { KEY_WHITE });
-            let black = Rect::from_min_max(r.min, pos2(r.left() + r.width() * 0.62, r.bottom()));
-            kp.rect_filled(black, 0.0, if pressed { ORANGE } else { KEY_BLACK });
-        } else {
-            kp.rect_filled(r, 0.0, if pressed { ORANGE_LIGHT } else { KEY_WHITE });
+        if screen() {
+            screen_key(&kp, r, key, pressed, key % 12 == 0 || key == default_key);
+            if key % 12 == 0 || key == default_key {
+                let label = if key == default_key && key % 12 != 0 { format!("{} ●", key_name(key)) } else { key_name(key) };
+                skin::gtext(&kp, pos2(r.right() - 6.0, r.center().y), Align2::RIGHT_CENTER, label, bold(11.0), pal().key_label);
+            }
+            continue;
         }
-        hline(&kp, r.bottom() - 0.5, r.left(), r.right(), KEY_LINE, 1.0);
+        if is_black_key(key) {
+            kp.rect_filled(r, 0.0, if pressed { pal().orange_light } else { pal().key_white });
+            let black = Rect::from_min_max(r.min, pos2(r.left() + r.width() * 0.62, r.bottom()));
+            kp.rect_filled(black, 0.0, if pressed { pal().orange } else { pal().key_black });
+        } else {
+            kp.rect_filled(r, 0.0, if pressed { pal().orange_light } else { pal().key_white });
+        }
+        hline(&kp, r.bottom() - 0.5, r.left(), r.right(), pal().key_line, 1.0);
         if key % 12 == 0 || key == default_key {
             let label = if key == default_key && key % 12 != 0 { format!("{} ●", key_name(key)) } else { key_name(key) };
-            kp.text(pos2(r.right() - 6.0, r.center().y), Align2::RIGHT_CENTER, label, bold(11.0), KEY_LABEL);
+            kp.text(pos2(r.right() - 6.0, r.center().y), Align2::RIGHT_CENTER, label, bold(11.0), pal().key_label);
         }
     }
 
     // Lane: velocity, or pan when it is the active parameter.
-    p.rect_filled(vel_full, 8.0, INNER);
-    p.rect_stroke(vel_full, 8.0, Stroke::new(1.0_f32, EDGE));
-    p.rect_stroke(roll, 8.0, Stroke::new(1.0_f32, EDGE));
+    p.rect_filled(vel_full, 8.0, pal().inner);
+    p.rect_stroke(vel_full, 8.0, Stroke::new(1.0_f32, pal().edge));
+    p.rect_stroke(roll, 8.0, Stroke::new(1.0_f32, pal().edge));
     let param = ps.param;
     lane_label(p, vlabel, param, !selected.is_empty());
     let vp = ui.painter_at(vel);
@@ -981,6 +1006,18 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         } else {
             let h = (n.velocity as f32 / 127.0) * (vel.height() - 8.0);
             let r = Rect::from_min_max(pos2(x, vel.bottom() - 4.0 - h), pos2(x + 10.0, vel.bottom() - 4.0));
+            if screen() {
+                // Display: a stack of LED segments, unlit ones faint up to the top.
+                let full = vel.height() - 8.0;
+                let mut y = vel.bottom() - 4.0;
+                while y - 3.0 >= vel.bottom() - 4.0 - full {
+                    let seg = Rect::from_min_max(pos2(x, y - 3.0), pos2(x + 10.0, y));
+                    let lit = y - 3.0 >= r.top() - 0.5;
+                    vp.rect_filled(seg, 0.5, if lit { c } else { with_alpha(c, 28) });
+                    y -= 5.0;
+                }
+                continue;
+            }
             vp.rect_filled(r, egui::Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, c);
             vp.rect_filled(Rect::from_min_size(r.min, vec2(10.0, 3.0)), 2.0, mix(c, Color32::WHITE, 0.6));
         }
@@ -990,7 +1027,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     if let Some(at) = gesture_at {
         let value = seq_edit::param_range(&notes, &selected, param).map(|r| range_text(param, r)).unwrap_or_default();
         let fp = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, ui.id().with("param_label")));
-        let g = fp.layout_no_wrap(format!("{}  {}", param_short(param), value), bold(22.0), TEXT);
+        let g = fp.layout_no_wrap(format!("{}  {}", param_short(param), value), bold(22.0), pal().text);
         let size = g.size() + vec2(28.0, 16.0);
         // Above the finger, kept on screen.
         let screen = ui.ctx().screen_rect();
@@ -999,9 +1036,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             (at.y - 90.0).max(screen.top() + size.y / 2.0),
         );
         let r = Rect::from_center_size(c, size);
-        fp.rect_filled(r, 10.0, POPUP);
-        fp.rect_stroke(r, 10.0, Stroke::new(2.0_f32, ORANGE));
-        fp.galley(r.center() - g.size() / 2.0, g, TEXT);
+        fp.rect_filled(r, 10.0, pal().popup);
+        fp.rect_stroke(r, 10.0, Stroke::new(2.0_f32, pal().orange));
+        fp.galley(r.center() - g.size() / 2.0, g, pal().text);
     }
 
     if let Some(r) = side {
@@ -1013,12 +1050,28 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 
 /// Full-screen side panel: picks the active parameter, shows its value for the selected
 /// notes (or their range) and how many are selected. Never changes the selection.
+/// Display theme: a keyboard row drawn as segment-display cells, lit amber for white keys,
+/// faint for black keys (and for the labelled rows, so the label reads on top).
+fn screen_key(p: &egui::Painter, r: Rect, key: u8, pressed: bool, labelled: bool) {
+    let amber = pal().orange;
+    let (cells, gap) = (4, 3.0);
+    let inner = r.shrink2(vec2(5.0, 2.0));
+    let w = (inner.width() - gap * (cells - 1) as f32) / cells as f32;
+    let black = is_black_key(key);
+    for c in 0..cells {
+        let cell = Rect::from_min_size(pos2(inner.left() + c as f32 * (w + gap), inner.top()), vec2(w, inner.height()));
+        let lit = pressed || (!black && !labelled) || (black && c == cells - 1);
+        let col = if pressed { pal().yellow } else if lit { with_alpha(amber, 210) } else { with_alpha(amber, 34) };
+        p.rect_filled(cell, 1.5, col);
+    }
+}
+
 fn side_panel(ui: &Ui, rect: Rect, param: &mut NoteParam, notes: &[Note], selected: &[usize]) {
     let p = ui.painter();
-    p.rect_filled(rect, 8.0, INNER);
-    p.rect_stroke(rect, 8.0, Stroke::new(1.0_f32, EDGE));
+    p.rect_filled(rect, 8.0, pal().inner);
+    p.rect_stroke(rect, 8.0, Stroke::new(1.0_f32, pal().edge));
     let inner = rect.shrink(10.0);
-    skin::caption(p, pos2(inner.left() + 2.0, inner.top() + 8.0), Align2::LEFT_CENTER, tr!("PARAMÈTRE", "PARAMETER"), TEXT_DIMMER);
+    skin::caption(p, pos2(inner.left() + 2.0, inner.top() + 8.0), Align2::LEFT_CENTER, tr!("PARAMÈTRE", "PARAMETER"), pal().text_dimmer);
     let mut y = inner.top() + 22.0;
     for (i, &np) in NoteParam::ALL.iter().enumerate() {
         let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), PARAM_BTN_H));
@@ -1027,29 +1080,29 @@ fn side_panel(ui: &Ui, rect: Rect, param: &mut NoteParam, notes: &[Note], select
             *param = np;
         }
         let fg = skin::paint_button(p, r, 8.0, Kind::Tile, *param == np, resp.is_pointer_button_down_on(), resp.hovered(), true);
-        p.text(r.center(), Align2::CENTER_CENTER, param_name(np), bold(17.0), fg);
+        skin::gtext(&p, r.center(), Align2::CENTER_CENTER, param_name(np), bold(17.0), fg);
         y += PARAM_BTN_H + 8.0;
     }
     // Value of the selected notes, updated live.
     let lcd_r = Rect::from_min_size(pos2(inner.left(), y + 6.0), vec2(inner.width(), 66.0));
     skin::lcd_bg(p, lcd_r, 9.0);
-    skin::caption(p, pos2(lcd_r.center().x, lcd_r.top() + 13.0), Align2::CENTER_CENTER, param_short(*param), LCD_LABEL);
+    skin::caption(p, pos2(lcd_r.center().x, lcd_r.top() + 13.0), Align2::CENTER_CENTER, param_short(*param), pal().lcd_label);
     let value = seq_edit::param_range(notes, selected, *param).map(|r| range_text(*param, r)).unwrap_or_else(|| "—".into());
     let size = if value.chars().count() > 7 { 17.0 } else { 24.0 };
-    skin::lcd_text(p, pos2(lcd_r.center().x, lcd_r.center().y + 8.0), Align2::CENTER_CENTER, &value, lcd(size), LCD_GREEN);
+    skin::lcd_text(p, pos2(lcd_r.center().x, lcd_r.center().y + 8.0), Align2::CENTER_CENTER, &value, lcd(size), pal().lcd_green);
     let count = match selected.len() {
         0 => tr!("Aucune note sélectionnée", "No note selected").to_string(),
         1 => tr!("1 note sélectionnée", "1 note selected").to_string(),
         n => trf!("{} notes sélectionnées", "{} notes selected", n),
     };
-    let g = p.layout(count, body(13.5), TEXT_DIM, inner.width());
+    let g = p.layout(count, body(13.5), pal().text_dim, inner.width());
     let bottom = lcd_r.bottom() + 10.0 + g.size().y;
-    p.galley(pos2(inner.left() + 2.0, lcd_r.bottom() + 10.0), g, TEXT_DIM);
+    p.galley(pos2(inner.left() + 2.0, lcd_r.bottom() + 10.0), g, pal().text_dim);
     let hint = tr!("Tenez une note et glissez un autre doigt vers le haut ou le bas.", "Hold a note and slide another finger up or down.");
-    let g = p.layout(hint.to_string(), body(12.5), TEXT_DIMMER, inner.width());
+    let g = p.layout(hint.to_string(), body(12.5), pal().text_dimmer, inner.width());
     let y = inner.bottom() - g.size().y;
     if y > bottom + 8.0 {
-        p.galley(pos2(inner.left() + 2.0, y), g, TEXT_DIMMER);
+        p.galley(pos2(inner.left() + 2.0, y), g, pal().text_dimmer);
     }
 }
 
@@ -1058,14 +1111,14 @@ fn lane_label(p: &egui::Painter, r: Rect, param: NoteParam, selection: bool) {
     let r = r.shrink(4.0);
     skin::paint_button(p, r, 6.0, Kind::Dark, false, false, false, true);
     let c = r.center();
-    skin::caption(p, c - vec2(0.0, 12.0), Align2::CENTER_CENTER, param_short(param), TEXT);
+    skin::caption(p, c - vec2(0.0, 12.0), Align2::CENTER_CENTER, param_short(param), pal().text);
     let n = NoteParam::ALL.len() as f32;
     for (i, &np) in NoteParam::ALL.iter().enumerate() {
         let x = c.x + (i as f32 - (n - 1.0) / 2.0) * 10.0;
-        p.circle_filled(pos2(x, c.y + 4.0), 3.0, if np == param { ORANGE } else { SEG_ON });
+        p.circle_filled(pos2(x, c.y + 4.0), 3.0, if np == param { pal().orange } else { pal().seg_on });
     }
     if selection {
-        skin::caption(p, c + vec2(0.0, 17.0), Align2::CENTER_CENTER, tr!("SÉL", "SEL"), TEXT_DIMMER);
+        skin::caption(p, c + vec2(0.0, 17.0), Align2::CENTER_CENTER, tr!("SÉL", "SEL"), pal().text_dimmer);
     }
 }
 
