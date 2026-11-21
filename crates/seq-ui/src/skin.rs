@@ -529,6 +529,13 @@ pub fn menu_item(ui: &mut Ui, text: &str, color: Color32, selected: bool) -> Res
     resp
 }
 
+/// Greyed menu row that does nothing (an action that is not possible, and why).
+pub fn menu_disabled(ui: &mut Ui, text: &str) {
+    let w = ui.available_width().max(200.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
+    ui.painter().text(pos2(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, text, body(15.5), TEXT_DIMMER);
+}
+
 /// Menu row with an on/off switch on the right (the click toggles: up to the caller).
 pub fn menu_toggle(ui: &mut Ui, text: &str, on: bool) -> Response {
     let w = ui.available_width().max(200.0);

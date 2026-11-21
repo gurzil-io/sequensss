@@ -119,8 +119,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             if skin::menu_item(ui, tr!("Renommer…", "Rename…"), TEXT, false).clicked() {
                 st.renaming_pattern = Some((st.pattern, name.clone()));
             }
-            if skin::menu_item(ui, tr!("Supprimer", "Delete"), DANGER, false).clicked() && !seq_edit::delete_pattern(project, st.pattern) {
-                st.status = tr!("Impossible de supprimer le dernier pattern", "Can't delete the last pattern").into();
+            if project.patterns.len() <= 1 {
+                skin::menu_disabled(ui, tr!("Dernier pattern, impossible à supprimer", "Last pattern, can't be deleted"));
+            } else if skin::menu_item(ui, tr!("Supprimer", "Delete"), DANGER, false).clicked() {
+                seq_edit::delete_pattern(project, st.pattern);
             }
         });
         // Length: − / + one bar. Painting past the end also grows the pattern.

@@ -609,9 +609,23 @@ fn tap_menu(st: &mut SeqUi, ui: &mut Ui, id: egui::Id, anchor: Rect, project: &m
     };
     let Some(name) = project.pattern(pat).map(|p| p.name.clone()) else { return };
     let uses = project.arrangement.clips.iter().filter(|c| c.pattern == pat).count();
+    let last = project.patterns.len() <= 1;
+    let on_clip = matches!(menu, TapMenu::Clip(_));
+    // The last pattern stays: its clips can still go, unless "Delete this clip" already does it.
+    let pattern_item = match (last, uses) {
+        (false, 0) => Some(tr!("Supprimer le pattern", "Delete pattern").to_string()),
+        (false, 1) => Some(tr!("Supprimer le pattern et son clip", "Delete pattern and its clip").to_string()),
+        (false, n) => Some(trf!("Supprimer le pattern et ses {} clips", "Delete pattern and its {} clips", n)),
+        (true, 0) => None,
+        (true, 1) if on_clip => None,
+        (true, 1) => Some(tr!("Supprimer son clip", "Delete its clip").to_string()),
+        (true, n) => Some(trf!("Supprimer ses {} clips", "Delete its {} clips", n)),
+    };
+    let rows = if on_clip { 2 } else { 1 };
+    let (anchor, side) = menu_anchor(anchor, menu_height(rows), ui.ctx().screen_rect());
     let anchor = ui.interact(anchor, id.with("anchor"), Sense::hover());
     let mut done = false;
-    egui::popup_below_widget(ui, id, &anchor, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+    egui::popup_above_or_below_widget(ui, id, &anchor, side, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
         ui.set_min_width(260.0);
         skin::menu_caption(ui, &name.to_uppercase());
         if let TapMenu::Clip(i) = menu
@@ -620,16 +634,17 @@ fn tap_menu(st: &mut SeqUi, ui: &mut Ui, id: egui::Id, anchor: Rect, project: &m
             seq_edit::delete_clips(&mut project.arrangement.clips, &[i]);
             done = true;
         }
-        let label = match uses {
-            0 => tr!("Supprimer le pattern", "Delete pattern").to_string(),
-            1 => tr!("Supprimer le pattern et son clip", "Delete pattern and its clip").to_string(),
-            n => trf!("Supprimer le pattern et ses {} clips", "Delete pattern and its {} clips", n),
-        };
-        if skin::menu_item(ui, &label, DANGER, false).clicked() {
-            if !seq_edit::delete_pattern(project, pat) {
-                st.status = tr!("Impossible de supprimer le dernier pattern", "Can't delete the last pattern").into();
+        match &pattern_item {
+            Some(label) if skin::menu_item(ui, label, DANGER, false).clicked() => {
+                if last {
+                    seq_edit::delete_pattern_clips(project, pat);
+                } else {
+                    seq_edit::delete_pattern(project, pat);
+                }
+                done = true;
             }
-            done = true;
+            Some(_) => {}
+            None => skin::menu_disabled(ui, tr!("Dernier pattern, impossible à supprimer", "Last pattern, can't be deleted")),
         }
     });
     if done {
@@ -639,6 +654,42 @@ fn tap_menu(st: &mut SeqUi, ui: &mut Ui, id: egui::Id, anchor: Rect, project: &m
     }
 }
 
+/// Height of the tap menu: caption, `rows` items of 40 points, frame margins.
+fn menu_height(rows: usize) -> f32 {
+    28.0 + rows as f32 * 44.0 + 20.0
+}
+
+/// Where the tap menu opens: below the anchor if it fits on screen, otherwise on the side
+/// with the most room (egui then keeps it inside the screen). The anchor is narrowed so a
+/// long clip does not stretch the menu across the timeline.
+fn menu_anchor(anchor: Rect, menu_h: f32, screen: Rect) -> (Rect, egui::AboveOrBelow) {
+    let anchor = Rect::from_min_size(anchor.min, vec2(anchor.width().min(260.0), anchor.height()));
+    let below = screen.bottom() - anchor.bottom();
+    let above = anchor.top() - screen.top();
+    let side = if below >= menu_h || below >= above { egui::AboveOrBelow::Below } else { egui::AboveOrBelow::Above };
+    (anchor, side)
+}
+
 fn fmt_bar(t: Tick, bar: Tick) -> String {
     if t.is_multiple_of(bar) { format!("{}", t / bar + 1) } else { format!("{:.2}", t as f64 / bar as f64 + 1.0) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tap_menu_stays_on_a_phone_screen() {
+        // 2400 × 1080 px landscape phone at 2.625 px per point.
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(914.0, 411.0));
+        let h = menu_height(2);
+        let side = |top: f32| menu_anchor(Rect::from_min_size(pos2(300.0, top), vec2(900.0, 60.0)), h, screen);
+        // Room below: below. Clip near the bottom: above, and fits.
+        assert!(matches!(side(80.0).1, egui::AboveOrBelow::Below));
+        let (r, s) = side(300.0);
+        assert!(matches!(s, egui::AboveOrBelow::Above));
+        assert!(r.top() - h >= screen.top());
+        // A long clip does not stretch the menu.
+        assert_eq!(r.width(), 260.0);
+    }
 }

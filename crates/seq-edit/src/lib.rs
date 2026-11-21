@@ -304,6 +304,14 @@ pub fn delete_pattern(project: &mut Project, pattern: PatternId) -> bool {
     true
 }
 
+/// Removes every clip of a pattern and keeps the pattern (the last one cannot be
+/// deleted). Returns the number of clips removed.
+pub fn delete_pattern_clips(project: &mut Project, pattern: PatternId) -> usize {
+    let before = project.arrangement.clips.len();
+    project.arrangement.clips.retain(|c| c.pattern != pattern);
+    before - project.arrangement.clips.len()
+}
+
 // ---------------------------------------------------------------------------
 // Pattern length. It grows by whole bars when something is placed past the end,
 // and only shrinks when the bars removed hold no note (nothing is ever cut).
@@ -966,6 +974,23 @@ mod tests {
         assert!(delete_pattern(&mut p, p2));
         assert!(p.arrangement.clips.is_empty());
         assert!(!delete_pattern(&mut p, pat));
+    }
+
+    #[test]
+    fn delete_pattern_clips_keeps_the_pattern_and_undoes() {
+        let (mut p, pat, _) = setup();
+        let p2 = new_pattern(&mut p);
+        p.arrangement.clips.push(Clip { pattern: pat, track: 0, start: 0, len: 100 });
+        p.arrangement.clips.push(Clip { pattern: p2, track: 1, start: 0, len: 100 });
+        p.arrangement.clips.push(Clip { pattern: pat, track: 2, start: 200, len: 100 });
+        let mut h = History::new(&p, 100);
+        assert_eq!(delete_pattern_clips(&mut p, pat), 2);
+        assert!(p.pattern(pat).is_some());
+        assert_eq!(p.arrangement.clips, vec![Clip { pattern: p2, track: 1, start: 0, len: 100 }]);
+        assert_eq!(delete_pattern_clips(&mut p, pat), 0);
+        assert!(h.commit_if_changed(&p, false));
+        assert!(h.undo(&mut p));
+        assert_eq!(p.arrangement.clips.len(), 3);
     }
 
     #[test]
