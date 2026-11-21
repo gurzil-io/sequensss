@@ -407,9 +407,9 @@ impl App {
             return;
         }
         let Some(rec) = self.recorder.event(channel, key, vel, tick, time, on) else { return };
-        let quantize = self.ui.quantize;
+        let grid = self.ui.record_grid();
         let Some(pat) = self.project.pattern_mut(self.ui.pattern) else { return };
-        pat.notes.entry(rec.channel).or_default().push(rec.to_note(pat.length, quantize));
+        pat.notes.entry(rec.channel).or_default().push(rec.to_note(pat.length, grid));
     }
 
     // ------------------------------------------------------------------

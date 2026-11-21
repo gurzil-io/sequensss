@@ -170,6 +170,13 @@ fn restore(notes: &mut [Note], orig: &[(usize, Note)]) {
     }
 }
 
+impl PianoState {
+    /// Snap to grid, in ticks (1 = free).
+    pub fn snap(&self) -> Tick {
+        self.snap
+    }
+}
+
 fn set_selection(sel: &mut Vec<usize>, mut v: Vec<usize>) {
     v.sort_unstable();
     v.dedup();
@@ -212,7 +219,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         skin::segmented(
             ui,
             &mut st.piano.snap,
-            &[(PPQ as Tick / 2, None, "1/8"), (STEP, None, "1/16"), (PPQ as Tick / 8, None, "1/32"), (PPQ as Tick / 6, None, tr!("Triol.", "Triplet")), (1, None, tr!("Libre", "Free"))],
+            &[(PPQ as Tick, None, "1/4"), (PPQ as Tick / 2, None, "1/8"),(STEP, None, "1/16"), (PPQ as Tick / 8, None, "1/32"), (PPQ as Tick / 6, None, tr!("Triol.", "Triplet")), (1, None, tr!("Libre", "Free"))],
             38.0,
             44.0,
             skin::SegStyle::Grey,

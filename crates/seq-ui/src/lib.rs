@@ -263,6 +263,12 @@ impl SeqUi {
         self.tab = tab;
     }
 
+    /// Quantization of the recorded notes, in ticks: the piano roll snap, 0 when off
+    /// (1 when the snap is free).
+    pub fn record_grid(&self) -> Tick {
+        if self.quantize { self.piano.snap() } else { 0 }
+    }
+
     fn act(&mut self, a: UiAction) {
         self.actions.push(a);
     }

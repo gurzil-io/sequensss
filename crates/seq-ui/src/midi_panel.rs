@@ -83,9 +83,24 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) {
         let p = ui.painter();
         p.rect_filled(r, 7.0, INNER2);
         p.rect_stroke(r, 7.0, egui::Stroke::new(1.0_f32, EDGE));
-        p.with_clip_rect(r).text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, tr!("Quantifier l'enreg. 1/16", "Quantize rec. 1/16"), body(15.0), TEXT);
+        p.with_clip_rect(r).text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, tr!("Quantifier l'enreg.", "Quantize rec."), body(15.0), TEXT);
+        // Active grid: the piano roll snap.
+        let grid = match st.record_grid() {
+            0 | 1 => tr!("Non", "Off"),
+            g if g == PPQ as Tick => "1/4",
+            g if g == PPQ as Tick / 2 => "1/8",
+            STEP => "1/16",
+            g if g == PPQ as Tick / 8 => "1/32",
+            g if g == PPQ as Tick / 6 => tr!("Triol.", "Triplet"),
+            _ => "?",
+        };
+        let gc = if st.record_grid() > 1 { ORANGE_TOP } else { TEXT_DIMMER };
+        p.text(pos2(r.right() - 80.0, r.center().y), Align2::RIGHT_CENTER, grid, body(15.0), gc);
         let mut su = ui.new_child(UiBuilder::new().max_rect(Rect::from_center_size(pos2(r.right() - 38.0, r.center().y), vec2(64.0, 34.0))));
-        skin::pill_switch(&mut su, &mut st.quantize, vec2(64.0, 34.0), None);
+        skin::pill_switch(&mut su, &mut st.quantize, vec2(64.0, 34.0), None).on_hover_text(tr!(
+            "Arrondit les notes enregistrées à la grille du piano roll (SNAP)",
+            "Rounds the recorded notes to the piano roll grid (SNAP)"
+        ));
     });
 
     // --- Right column: MIDI outputs ---
