@@ -150,6 +150,7 @@ pub enum Editor {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EditCmd {
     Copy,
+    Cut,
     Paste,
     Delete,
     SelectAll,
@@ -605,10 +606,14 @@ impl SeqUi {
             if i.events.iter().any(|e| matches!(e, egui::Event::Copy)) || (cmd && i.key_pressed(Key::C)) {
                 cmds.push(EditCmd::Copy);
             }
+            if i.events.iter().any(|e| matches!(e, egui::Event::Cut)) || (cmd && i.key_pressed(Key::X)) {
+                cmds.push(EditCmd::Cut);
+            }
             if i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))) || (cmd && i.key_pressed(Key::V)) {
                 cmds.push(EditCmd::Paste);
             }
-            if i.key_pressed(Key::Delete) {
+            // Backspace too: the "delete" key of Mac keyboards.
+            if i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace) {
                 cmds.push(EditCmd::Delete);
             }
             if cmd && i.key_pressed(Key::A) {
@@ -1038,6 +1043,8 @@ mod tests {
     fn no_edit_shortcuts_behind_the_settings_dialog() {
         let mut ui = SeqUi::new(&Project::default());
         assert_eq!(press(&mut ui, Key::Delete), Some((Editor::Piano, EditCmd::Delete)));
+        ui.active_editor = Editor::Timeline;
+        assert_eq!(press(&mut ui, Key::Backspace), Some((Editor::Timeline, EditCmd::Delete)));
         ui.settings_open = true;
         for key in [Key::Delete, Key::Escape, Key::ArrowLeft] {
             assert_eq!(press(&mut ui, key), None, "{key:?}");

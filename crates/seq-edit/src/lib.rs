@@ -625,6 +625,48 @@ pub fn clamp_clip_shift(orig: &[Clip], dt: i64, dtr: i32, tracks: u16) -> (i64, 
     (dt.max(-min_start), dtr.clamp(-min_tr, (tracks.max(1) as i32 - 1 - max_tr).max(-min_tr)))
 }
 
+/// Moves the clips saved at the start of a gesture (`orig`: index, clip) by `dt` ticks and
+/// `dtr` tracks, clamped inside the playlist. Returns the shift applied.
+pub fn move_clips(clips: &mut [Clip], orig: &[(usize, Clip)], dt: i64, dtr: i32, tracks: u16) -> (i64, i32) {
+    let base: Vec<Clip> = orig.iter().map(|(_, c)| *c).collect();
+    let (dt, dtr) = clamp_clip_shift(&base, dt, dtr, tracks);
+    for &(i, c) in orig {
+        if let Some(m) = clips.get_mut(i) {
+            m.start = (c.start as i64 + dt) as Tick;
+            m.track = (c.track as i32 + dtr) as u16;
+        }
+    }
+    (dt, dtr)
+}
+
+/// Resizes the clips saved at the start of a gesture so that `anchor` ends at `end`; the
+/// others grow or shrink by the same amount. No clip gets shorter than `min`.
+pub fn resize_clips(clips: &mut [Clip], orig: &[(usize, Clip)], anchor: usize, end: Tick, min: Tick) {
+    let Some(&(_, a)) = orig.iter().find(|(i, _)| *i == anchor) else { return };
+    let min = min.max(1);
+    let delta = end.max(a.start + min) as i64 - (a.start + a.len) as i64;
+    for &(i, c) in orig {
+        if let Some(m) = clips.get_mut(i) {
+            m.len = (c.len as i64 + delta).max(min as i64) as Tick;
+        }
+    }
+}
+
+/// Cut: returns the selection as [`copy_clips`] does, and removes it.
+pub fn cut_clips(clips: &mut Vec<Clip>, sel: &[usize]) -> Vec<Clip> {
+    let copied = copy_clips(clips, sel);
+    delete_clips(clips, sel);
+    copied
+}
+
+/// Where a paste goes after the selection: the first snap step after its end, on its
+/// topmost track.
+pub fn paste_after_clips(clips: &[Clip], sel: &[usize], snap: Tick) -> Option<(Tick, u16)> {
+    let (_, end, track) = clips_span(clips, sel)?;
+    let snap = snap.max(1);
+    Some((end.div_ceil(snap) * snap, track))
+}
+
 pub fn shift_clips(clips: &mut [Clip], sel: &[usize], dt: i64, dtr: i32, tracks: u16) -> bool {
     let orig: Vec<Clip> = sel.iter().filter_map(|&i| clips.get(i).copied()).collect();
     let (dt, dtr) = clamp_clip_shift(&orig, dt, dtr, tracks);
@@ -1289,6 +1331,62 @@ mod tests {
         assert_eq!((clips[1].start, clips[1].track), (3840, 1));
         delete_clips(&mut clips, &[0, 1]);
         assert_eq!(clips.len(), 5);
+    }
+
+    #[test]
+    fn clips_move_resize_cut_paste_after() {
+        let bar: Tick = 3840;
+        let c = |start, track, len| Clip { pattern: PatternId(1), track, start, len };
+        let mut clips = vec![c(bar, 1, bar), c(3 * bar, 2, 2 * bar), c(0, 0, bar)];
+        let orig: Vec<(usize, Clip)> = [0, 1].iter().map(|&i| (i, clips[i])).collect();
+        // Moved together; clamped at the start and on the last track.
+        assert_eq!(move_clips(&mut clips, &orig, -5 * bar as i64, 4, 4), (-(bar as i64), 1));
+        assert_eq!((clips[0].start, clips[0].track, clips[1].start, clips[1].track), (0, 2, 2 * bar, 3));
+        assert_eq!(clips[2], c(0, 0, bar), "not part of the move");
+        // From the original positions again (the gesture recomputes from `orig`).
+        move_clips(&mut clips, &orig, bar as i64, 0, 4);
+        assert_eq!((clips[0].start, clips[1].start), (2 * bar, 4 * bar));
+        // Resize by the anchor's end: the same amount for each, never below the minimum.
+        let orig: Vec<(usize, Clip)> = [0, 1].iter().map(|&i| (i, clips[i])).collect();
+        resize_clips(&mut clips, &orig, 0, 4 * bar, bar);
+        assert_eq!((clips[0].len, clips[1].len), (2 * bar, 3 * bar));
+        resize_clips(&mut clips, &orig, 1, 0, bar);
+        assert_eq!((clips[0].len, clips[1].len), (bar, bar));
+        // Paste after the selection: next snap step after its end, topmost track.
+        assert_eq!(paste_after_clips(&clips, &[0, 1], bar), Some((5 * bar, 1)));
+        assert_eq!(paste_after_clips(&clips, &[], bar), None);
+        let cut = cut_clips(&mut clips, &[0, 1]);
+        assert_eq!(cut, vec![c(0, 0, bar), c(2 * bar, 1, bar)]);
+        assert_eq!(clips, vec![c(0, 0, bar)]);
+    }
+
+    #[test]
+    fn clip_edits_undo_one_step_each() {
+        let (mut p, pat, _) = setup();
+        let bar = p.bar_len();
+        p.arrangement.tracks = 4;
+        p.arrangement.clips = vec![Clip { pattern: pat, track: 0, start: 0, len: bar }, Clip { pattern: pat, track: 1, start: bar, len: bar }];
+        let start = p.arrangement.clips.clone();
+        let mut h = History::new(&p, 100);
+        // A drag: many frames with the pointer down, one undo step on release.
+        let orig: Vec<(usize, Clip)> = p.arrangement.clips.iter().copied().enumerate().collect();
+        for dt in 1..=4 {
+            move_clips(&mut p.arrangement.clips, &orig, dt * bar as i64, 1, 4);
+            assert!(!h.commit_if_changed(&p, true));
+        }
+        assert!(h.commit_if_changed(&p, false));
+        let moved = p.arrangement.clips.clone();
+        let clip = cut_clips(&mut p.arrangement.clips, &[0, 1]);
+        assert!(h.commit_if_changed(&p, false));
+        let (at, track) = (2 * bar, 2);
+        paste_clips(&mut p.arrangement.clips, &clip, at, track, 4);
+        assert!(h.commit_if_changed(&p, false));
+        assert!(h.undo(&mut p));
+        assert!(p.arrangement.clips.is_empty());
+        assert!(h.undo(&mut p));
+        assert_eq!(p.arrangement.clips, moved);
+        assert!(h.undo(&mut p));
+        assert_eq!(p.arrangement.clips, start);
     }
 
     #[test]

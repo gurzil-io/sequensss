@@ -28,11 +28,11 @@ const VEL_H: f32 = 56.0;
 const SIDE_W: f32 = 176.0;
 const PARAM_BTN_H: f32 = 60.0;
 const SIDE_MIN_W: f32 = 640.0;
-const EDGE_PX: f32 = 8.0;
+pub(crate) const EDGE_PX: f32 = 8.0;
 /// Touch: the resize handle reaches this far inside a note (at most 40% of its width)...
-const EDGE_TOUCH_IN: f32 = 22.0;
+pub(crate) const EDGE_TOUCH_IN: f32 = 22.0;
 /// ...and this far past its right edge, over empty space.
-const EDGE_TOUCH_OUT: f32 = 12.0;
+pub(crate) const EDGE_TOUCH_OUT: f32 = 12.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -527,6 +527,11 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         Some(EditCmd::Deselect) => ps.selected.clear(),
         Some(EditCmd::Copy) if !ps.selected.is_empty() => {
             ps.clipboard = seq_edit::copy_notes(&notes, &ps.selected);
+        }
+        Some(EditCmd::Cut) if !ps.selected.is_empty() => {
+            ps.clipboard = seq_edit::copy_notes(&notes, &ps.selected);
+            seq_edit::delete_notes(&mut notes, &ps.selected);
+            ps.selected.clear();
         }
         Some(EditCmd::Paste) if !ps.clipboard.is_empty() => {
             // After the selection, otherwise under the mouse, otherwise at the start of the pattern.

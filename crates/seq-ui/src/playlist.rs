@@ -1,10 +1,15 @@
-//! Timeline (playlist): pattern palette, tracks × time, clips, multi-selection,
-//! selection loop, track mute.
+//! Timeline (playlist): pattern palette, tracks × time, clips, tools (draw / select / erase
+//! / brush, as in the piano roll), multi-selection, selection loop, track mute.
+//!
+//! Double tap on a clip: deletes it (not with the eraser, which already does). Double tap
+//! on a palette pattern: its menu (delete the pattern and its clips).
 //!
 //! Touch: two fingers scroll and zoom. With one finger, the strip under the lanes scrolls
 //! horizontally and a drag on the mute column scrolls the tracks. The timeline always
 //! reaches one screen past the end of the song, so there is room for new clips.
 
+use crate::icons::Icon;
+use crate::piano::{EDGE_PX, EDGE_TOUCH_IN, EDGE_TOUCH_OUT, Tool};
 use crate::skin::{self, Kind};
 use crate::theme::*;
 use crate::widgets::{Pointer, vline};
@@ -16,7 +21,6 @@ use seq_model::*;
 use std::collections::HashMap;
 
 const RULER_H: f32 = 28.0;
-const EDGE_PX: f32 = 8.0;
 const PALETTE_W: f32 = 230.0;
 /// Column of mute buttons, left of the tracks.
 const LANE_W: f32 = 40.0;
@@ -34,7 +38,8 @@ enum Drag {
     Move { anchor: usize, grab: i64, orig: Vec<(usize, Clip)>, fresh: bool },
     Resize { anchor: usize, orig: Vec<(usize, Clip)> },
     Marquee { from: Pos2, additive: bool, base: Vec<usize> },
-    Erase,
+    /// Eraser (or right button): `before` = clips before the gesture (restored on two fingers).
+    Erase { before: Vec<Clip> },
     Loop { anchor: Tick, moved: bool },
     /// Brush: `brush` = copied clip (cell 0 = `brush.start`, fixed track), `last` = last
     /// painted cell, `before` = clips before the gesture (restored on two fingers).
@@ -42,13 +47,6 @@ enum Drag {
     /// Press on the mute column: past a few points of vertical drag, scrolls the tracks
     /// (`y0`, `sy0` = starting position and scroll).
     ScrollY { y0: f32, sy0: f32, scrolling: bool },
-}
-
-/// Menu opened by a double tap: on a palette pattern, or on a clip (index).
-#[derive(Clone, Copy, PartialEq)]
-enum TapMenu {
-    Pattern(PatternId),
-    Clip(usize),
 }
 
 pub struct PlaylistState {
@@ -65,13 +63,16 @@ pub struct PlaylistState {
     /// Clips seen in the previous frame (changed elsewhere → selection cleared).
     seen: Option<Vec<Clip>>,
     clipboard: Vec<Clip>,
-    /// Brush tool: press on a clip then drag = end-to-end copies; on empty space =
-    /// clips of the selected pattern.
-    paint: bool,
-    menu: Option<TapMenu>,
+    /// Draw / select / erase / brush. Brush: press on a clip then drag = end-to-end copies;
+    /// on empty space = clips of the selected pattern.
+    pub tool: Tool,
+    /// Palette pattern whose menu is open (double tap on its tile).
+    menu: Option<PatternId>,
     /// Clip created by a tap on empty space, and when: the second tap of a double tap
-    /// there must not open its menu.
+    /// there must not delete it.
     fresh: Option<(usize, f64)>,
+    /// Selection when the current press began: restored if it becomes a two-finger gesture.
+    press_sel: Option<Vec<usize>>,
 }
 
 impl Default for PlaylistState {
@@ -86,9 +87,19 @@ impl Default for PlaylistState {
             selected: Vec::new(),
             seen: None,
             clipboard: Vec::new(),
-            paint: false,
+            tool: Tool::Draw,
             menu: None,
             fresh: None,
+            press_sel: None,
+        }
+    }
+}
+
+/// Puts back the clips saved at the start of a gesture.
+fn restore(clips: &mut [Clip], orig: &[(usize, Clip)]) {
+    for &(i, c) in orig {
+        if let Some(m) = clips.get_mut(i) {
+            *m = c;
         }
     }
 }
@@ -106,60 +117,80 @@ enum SnapSel {
     Step,
 }
 
+/// Header: tools, snap, tracks, loop. When everything does not fit with the tool names
+/// (docked on a tablet, phone), the tools show their icons only and the loop its bars only.
+fn header(st: &mut SeqUi, ui: &mut Ui, project: &mut Project, bar: Tick, beat: Tick) {
+    let font = body(14.0);
+    let text_w = |ui: &Ui, text: &str, font: &egui::FontId| ui.fonts(|f| f.layout_no_wrap(text.to_owned(), font.clone(), pal().text).size().x);
+    let tools = [
+        (Tool::Draw, Icon::Pencil, tr!("Dessiner", "Draw")),
+        (Tool::Select, Icon::Select, tr!("Sélection", "Select")),
+        (Tool::Erase, Icon::Eraser, tr!("Gomme", "Erase")),
+        (Tool::Paint, Icon::Brush, tr!("Pinceau", "Paint")),
+    ];
+    let named: Vec<(Tool, Option<Icon>, &str)> = tools.iter().map(|&(t, i, l)| (t, Some(i), l)).collect();
+    let snaps = [(SnapSel::Bar, None, tr!("Mesure", "Bar")), (SnapSel::Beat, None, tr!("Temps", "Beat")), (SnapSel::Step, None, tr!("Pas", "Step"))];
+    let (add, remove) = (tr!("+ piste", "+ track"), tr!("− piste", "− track"));
+    let loop_text = st.loop_region.map(|(a, b)| trf!("Boucle {} → {}", "Loop {} → {}", fmt_bar(a, bar), fmt_bar(b, bar)));
+    let gap = ui.spacing().item_spacing.x;
+    let full_w = skin::segmented_width(ui, &named, 0.0, &font)
+        + skin::segmented_width(ui, &snaps, 0.0, &font)
+        + text_w(ui, add, &body(14.5))
+        + text_w(ui, remove, &body(14.5))
+        + 56.0
+        + loop_text.as_ref().map_or(0.0, |t| text_w(ui, t, &font) + 46.0 + gap)
+        + 3.0 * gap;
+    let narrow = ui.available_width() < full_w;
+    let opts: Vec<(Tool, Option<Icon>, &str)> = named.iter().map(|&(t, i, l)| (t, i, if narrow { "" } else { l })).collect();
+    skin::segmented(ui, &mut st.playlist.tool, &opts, 38.0, if narrow { 46.0 } else { 0.0 }, skin::SegStyle::Orange, font.clone());
+
+    let mut s = match st.playlist.snap {
+        0 => SnapSel::Bar,
+        x if x == STEP => SnapSel::Step,
+        _ => SnapSel::Beat,
+    };
+    if skin::segmented(ui, &mut s, &snaps, 38.0, 0.0, skin::SegStyle::Grey, font.clone()) {
+        st.playlist.snap = match s {
+            SnapSel::Bar => 0,
+            SnapSel::Beat => beat,
+            SnapSel::Step => STEP,
+        };
+    }
+    if skin::auto_button(ui, 38.0, Kind::Dark, add).clicked() {
+        seq_edit::add_track(project);
+    }
+    if skin::auto_button(ui, 38.0, Kind::Dark, remove).clicked() {
+        seq_edit::remove_last_track(project);
+    }
+    if let (Some((a, b)), Some(full)) = (st.loop_region, loop_text) {
+        let text = if narrow { format!("{} → {}", fmt_bar(a, bar), fmt_bar(b, bar)) } else { full };
+        let tw = text_w(ui, &text, &font);
+        let (r, resp) = ui.allocate_exact_size(vec2(tw + 46.0, 38.0), Sense::click());
+        let p = ui.painter();
+        p.rect_filled(r, 7.0, with_alpha(pal().orange, 36));
+        p.rect_stroke(r, 7.0, Stroke::new(1.0_f32, with_alpha(pal().orange, 128)));
+        skin::gtext(p, pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, text, font.clone(), pal().orange_light);
+        skin::gtext(p, pos2(r.right() - 14.0, r.center().y), Align2::CENTER_CENTER, "×", body(20.0), pal().orange);
+        if resp.on_hover_text(tr!("Supprimer la boucle", "Remove loop")).clicked() {
+            st.loop_region = None;
+        }
+    }
+    if !st.song_mode {
+        let long = tr!("Mode PAT : passe en SONG pour écouter", "PAT mode: switch to SONG to listen");
+        let text = if ui.available_width() > text_w(ui, long, &medium(13.0)) + 8.0 { long } else { tr!("Mode PAT", "PAT mode") };
+        ui.label(egui::RichText::new(text).font(medium(13.0)).color(pal().orange_light)).on_hover_text(long);
+    }
+    if ui.available_width() > 330.0 {
+        skin::spacer_right(ui, 320.0);
+        skin::hint(ui, tr!("Glisser sur la règle = boucle · Toucher = position", "Drag on ruler = loop · Tap = position"));
+    }
+}
+
 pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info: &PlaybackInfo) {
     let bar = project.bar_len();
     let beat = project.beat_len();
 
-    let res = skin::panel(ui, rect, "TIMELINE", pal().lcd_green, |ui| {
-        let mut s = match st.playlist.snap {
-            0 => SnapSel::Bar,
-            x if x == STEP => SnapSel::Step,
-            _ => SnapSel::Beat,
-        };
-        if skin::segmented(ui, &mut s, &[(SnapSel::Bar, None, tr!("Mesure", "Bar")), (SnapSel::Beat, None, tr!("Temps", "Beat")), (SnapSel::Step, None, tr!("Pas", "Step"))], 38.0, 0.0, skin::SegStyle::Grey, body(14.0)) {
-            st.playlist.snap = match s {
-                SnapSel::Bar => 0,
-                SnapSel::Beat => beat,
-                SnapSel::Step => STEP,
-            };
-        }
-        let paint = st.playlist.paint;
-        if skin::button(ui, vec2(46.0, 38.0), Kind::Dark, paint, |p, r, c| {
-            crate::icons::draw(p, r, 18.0, crate::icons::Icon::Brush, if paint { pal().orange } else { c }, 1.9);
-        })
-        .on_hover_text(tr!("Pinceau : glisser depuis un clip pour le copier bout à bout", "Paint: drag from a clip to copy it end to end"))
-        .clicked()
-        {
-            st.playlist.paint = !paint;
-        }
-        if let Some((a, b)) = st.loop_region {
-            let text = trf!("Boucle {} → {}", "Loop {} → {}", fmt_bar(a, bar), fmt_bar(b, bar));
-            let font = body(14.0);
-            let tw = ui.fonts(|f| f.layout_no_wrap(text.clone(), font.clone(), pal().text).size().x);
-            let (r, resp) = ui.allocate_exact_size(vec2(tw + 46.0, 38.0), Sense::click());
-            let p = ui.painter();
-            p.rect_filled(r, 7.0, with_alpha(pal().orange, 36));
-            p.rect_stroke(r, 7.0, Stroke::new(1.0_f32, with_alpha(pal().orange, 128)));
-            skin::gtext(&p, pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, text, font, pal().orange_light);
-            skin::gtext(&p, pos2(r.right() - 14.0, r.center().y), Align2::CENTER_CENTER, "×", body(20.0), pal().orange);
-            if resp.on_hover_text(tr!("Supprimer la boucle", "Remove loop")).clicked() {
-                st.loop_region = None;
-            }
-        }
-        if skin::auto_button(ui, 38.0, Kind::Dark, tr!("+ piste", "+ track")).clicked() {
-            seq_edit::add_track(project);
-        }
-        if skin::auto_button(ui, 38.0, Kind::Dark, tr!("− piste", "− track")).clicked() {
-            seq_edit::remove_last_track(project);
-        }
-        if !st.song_mode {
-            ui.label(egui::RichText::new(tr!("Mode PAT : passe en SONG pour écouter", "PAT mode: switch to SONG to listen")).font(medium(13.0)).color(pal().orange_light));
-        }
-        if ui.available_width() > 330.0 {
-            skin::spacer_right(ui, 320.0);
-            skin::hint(ui, tr!("Glisser sur la règle = boucle · Toucher = position", "Drag on ruler = loop · Tap = position"));
-        }
-    });
+    let res = skin::panel(ui, rect, "TIMELINE", pal().lcd_green, |ui| header(st, ui, project, bar, beat));
     if res.expand {
         st.toggle_focus(PanelId::Timeline);
     }
@@ -204,7 +235,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 st.pattern = pat.id;
             }
             if resp.double_clicked() {
-                st.playlist.menu = Some(TapMenu::Pattern(pat.id));
+                st.playlist.menu = Some(pat.id);
                 ui.memory_mut(|m| m.open_popup(menu_id));
             }
             tiles.push((pat.id, r));
@@ -287,30 +318,34 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let clips = &mut project.arrangement.clips;
     if ps.seen.as_ref() != Some(&*clips) {
         ps.selected.clear();
-        if matches!(ps.menu, Some(TapMenu::Clip(_))) {
-            ps.menu = None;
-        }
         if matches!(ps.drag, Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Marquee { .. })) {
             ps.drag = None;
         }
     }
     ps.selected.retain(|&i| i < clips.len());
     let mut actions = Vec::new();
+    let (t0, t1) = (tick_of(grid.left()), tick_of(grid.right()));
 
-    // --- Edit commands ---
+    // --- Edit commands (keyboard, top bar) ---
     match edit {
         Some(EditCmd::SelectAll) => ps.selected = (0..clips.len()).collect(),
         Some(EditCmd::Deselect) => ps.selected.clear(),
         Some(EditCmd::Copy) if !ps.selected.is_empty() => ps.clipboard = seq_edit::copy_clips(clips, &ps.selected),
+        Some(EditCmd::Cut) if !ps.selected.is_empty() => {
+            ps.clipboard = seq_edit::cut_clips(clips, &ps.selected);
+            ps.selected.clear();
+        }
         Some(EditCmd::Paste) if !ps.clipboard.is_empty() => {
-            let (at, track) = match pointer.pos.filter(|p| grid.contains(*p)) {
-                Some(p) => (snap_floor(tick_of(p.x), snap), track_of(p.y)),
-                None => match seq_edit::clips_span(clips, &ps.selected) {
-                    Some((_, end, tr)) => (end.div_ceil(snap) * snap, tr),
-                    None => (0, 0),
-                },
-            };
-            let added = seq_edit::paste_clips(clips, &ps.clipboard, at, track, tracks);
+            // As in the piano roll: after the selection, otherwise under the mouse, otherwise
+            // at the playhead when it is in sight (Song mode), otherwise at the left of the view.
+            let at = seq_edit::paste_after_clips(clips, &ps.selected, snap)
+                .or_else(|| pointer.pos.filter(|p| grid.contains(*p)).map(|p| (snap_floor(tick_of(p.x), snap), track_of(p.y))))
+                .unwrap_or_else(|| {
+                    let ph = info.playhead.max(0.0) as Tick;
+                    let t = if st.song_mode && (t0..t1).contains(&ph) { snap_floor(ph, snap) } else { t0.div_ceil(snap) * snap };
+                    (t, track_of(grid.top() + 2.0))
+                });
+            let added = seq_edit::paste_clips(clips, &ps.clipboard, at.0, at.1, tracks);
             set_selection(&mut ps.selected, added);
         }
         Some(EditCmd::Duplicate) if !ps.selected.is_empty() => {
@@ -321,8 +356,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             seq_edit::delete_clips(clips, &ps.selected);
             ps.selected.clear();
         }
-        Some(EditCmd::Arrow { dx, dy, .. }) if !ps.selected.is_empty() => {
-            seq_edit::shift_clips(clips, &ps.selected, dx as i64 * snap as i64, dy, tracks);
+        // Arrows: by the snap (Shift: by a bar), up / down = track.
+        Some(EditCmd::Arrow { dx, dy, big }) if !ps.selected.is_empty() => {
+            let step = if big { bar } else { snap };
+            seq_edit::shift_clips(clips, &ps.selected, dx as i64 * step as i64, dy, tracks);
         }
         _ => {}
     }
@@ -334,20 +371,43 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         match drag {
             Drag::Move { anchor, fresh: true, .. } if anchor < clips.len() => {
                 clips.remove(anchor);
-                ps.selected.clear();
             }
-            Drag::Paint { before, .. } => {
-                *clips = before;
-                ps.selected.clear();
-            }
+            Drag::Move { orig, .. } | Drag::Resize { orig, .. } => restore(clips, &orig),
+            Drag::Paint { before, .. } | Drag::Erase { before } => *clips = before,
             _ => {}
+        }
+        if let Some(mut sel) = ps.press_sel.take() {
+            sel.retain(|&i| i < clips.len());
+            ps.selected = sel;
         }
     }
 
-    // --- Mouse: press ---
+    // --- Press ---
+    let tool = ps.tool;
     let hit = |clips: &[Clip], pos: Pos2| clips.iter().rposition(|c| clip_rect(c).contains(pos));
     let snapshot_of = |clips: &[Clip], sel: &[usize]| -> Vec<(usize, Clip)> { sel.iter().filter_map(|&i| clips.get(i).map(|c| (i, *c))).collect() };
-    if let Some(pos) = pointer.pos.filter(|_| resp.hovered()) {
+    let any_touches = ui.input(|i| i.any_touches());
+    // Clip whose resize handle is under `pos` (`h` = clip under `pos`). On touch the handle
+    // is wider than it looks, and reaches a little past the end of the clip.
+    let edge_of = |clips: &[Clip], h: Option<usize>, pos: Pos2| -> Option<usize> {
+        match h {
+            Some(i) => {
+                let r = clip_rect(&clips[i]);
+                let inside = if any_touches { (r.width() * 0.4).clamp(EDGE_PX, EDGE_TOUCH_IN) } else { EDGE_PX };
+                (pos.x >= r.right() - inside).then_some(i)
+            }
+            None if any_touches => clips.iter().rposition(|c| {
+                let r = clip_rect(c);
+                (r.top()..=r.bottom()).contains(&pos.y) && pos.x >= r.right() && pos.x <= r.right() + EDGE_TOUCH_OUT
+            }),
+            None => None,
+        }
+    };
+    let pressed = pointer.primary_pressed || pointer.secondary_pressed;
+    if let Some(pos) = pointer.pos.filter(|_| resp.hovered() && !pointer.multi) {
+        if pressed {
+            ps.press_sel = Some(ps.selected.clone());
+        }
         if pointer.primary_pressed {
             if ruler.contains(pos) {
                 ps.drag = Some(Drag::Loop { anchor: snap_round(tick_of(pos.x), snap), moved: false });
@@ -355,9 +415,19 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 ps.drag = Some(Drag::ScrollY { y0: pos.y, sy0: ps.scroll_y, scrolling: false });
             } else if grid.contains(pos) {
                 let t = tick_of(pos.x);
-                match hit(clips, pos) {
+                let h = hit(clips, pos);
+                let edge = edge_of(clips, h, pos);
+                match (tool, h) {
+                    (Tool::Erase, h) => {
+                        let before = clips.clone();
+                        if let Some(i) = h {
+                            seq_edit::delete_clips(clips, &[i]);
+                            ps.selected.clear();
+                        }
+                        ps.drag = Some(Drag::Erase { before });
+                    }
                     // Brush: copies the touched clip, otherwise places the selected pattern.
-                    h if ps.paint && !pointer.shift && !pointer.command => {
+                    (Tool::Paint, h) if !pointer.shift && !pointer.command => {
                         let before = clips.clone();
                         ps.selected.clear();
                         let brush = match h {
@@ -367,13 +437,16 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                                 .map(|(_, len, _)| Clip { pattern: st.pattern, track: track_of(pos.y), start: snap_floor(t, snap), len: *len }),
                         };
                         if let Some(brush) = brush {
-                            if h.is_none() {
-                                seq_edit::paint_clips(clips, brush, 0, 0);
+                            if h.is_none()
+                                && let Some(&i) = seq_edit::paint_clips(clips, brush, 0, 0).first()
+                            {
+                                ps.fresh = Some((i, pointer.time));
                             }
                             ps.drag = Some(Drag::Paint { brush, last: 0, before });
                         }
                     }
-                    Some(idx) if pointer.shift => {
+                    // Shift+click: add to / remove from the selection.
+                    (_, Some(idx)) if pointer.shift => {
                         if let Some(p) = ps.selected.iter().position(|&i| i == idx) {
                             ps.selected.remove(p);
                         } else {
@@ -382,25 +455,36 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                             set_selection(&mut ps.selected, v);
                         }
                     }
-                    Some(idx) => {
+                    // On a clip: selects it (its pattern becomes the current one), then moves
+                    // the selection, or resizes it by the clip's right end.
+                    (_, Some(idx)) => {
                         if !ps.selected.contains(&idx) {
                             ps.selected = vec![idx];
                         }
-                        if pointer.double_clicked {
-                            st.pattern = clips[idx].pattern;
-                        }
+                        st.pattern = clips[idx].pattern;
                         let orig = snapshot_of(clips, &ps.selected);
-                        if pos.x >= clip_rect(&clips[idx]).right() - EDGE_PX {
+                        if edge == Some(idx) {
                             ps.drag = Some(Drag::Resize { anchor: idx, orig });
                         } else {
                             ps.drag = Some(Drag::Move { anchor: idx, grab: t as i64 - clips[idx].start as i64, orig, fresh: false });
                         }
                     }
-                    None if pointer.command || pointer.shift => {
+                    // Touch, just past the end of a clip: its resize handle.
+                    (_, None) if !pointer.shift && !pointer.command && edge.is_some() => {
+                        let idx = edge.unwrap_or_default();
+                        if !ps.selected.contains(&idx) {
+                            ps.selected = vec![idx];
+                        }
+                        let orig = snapshot_of(clips, &ps.selected);
+                        ps.drag = Some(Drag::Resize { anchor: idx, orig });
+                    }
+                    // Select tool, or Ctrl/Shift + drag: rectangle.
+                    (Tool::Select, None) | (Tool::Draw, None) if tool == Tool::Select || pointer.command || pointer.shift => {
                         let base = if pointer.shift { ps.selected.clone() } else { Vec::new() };
                         ps.drag = Some(Drag::Marquee { from: pos, additive: pointer.shift, base });
                     }
-                    None => {
+                    // Draw: a clip of the current pattern, moved while the finger slides.
+                    (_, None) => {
                         ps.selected.clear();
                         if let Some((_, len, _)) = pat_info.get(&st.pattern) {
                             let start = snap_floor(t, snap);
@@ -418,26 +502,35 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             if ruler.contains(pos) {
                 st.loop_region = None;
             } else if grid.contains(pos) {
-                ps.drag = Some(Drag::Erase);
+                let before = clips.clone();
+                if let Some(i) = hit(clips, pos) {
+                    seq_edit::delete_clips(clips, &[i]);
+                    ps.selected.clear();
+                }
+                ps.drag = Some(Drag::Erase { before });
             }
         }
     }
 
-    // --- Double tap on a clip: its menu (not on a clip just created by the first tap) ---
+    // --- Double tap on a clip: delete it (not a clip just created by the first tap) ---
     if pointer.double_clicked
-        && !ps.paint
+        && !pointer.multi
+        && tool != Tool::Erase
         && !pointer.shift
         && !pointer.command
         && let Some(pos) = pointer.pos.filter(|p| resp.hovered() && grid.contains(*p))
         && let Some(idx) = hit(clips, pos)
         && !ps.fresh.is_some_and(|(i, t)| i == idx && pointer.time - t < 1.0)
     {
-        st.pattern = clips[idx].pattern;
-        ps.menu = Some(TapMenu::Clip(idx));
-        ui.memory_mut(|m| m.open_popup(menu_id));
+        // The second tap started a move, a resize or a brush stroke there: dropped with it.
+        ps.drag = None;
+        seq_edit::delete_clips(clips, &[idx]);
+        ps.selected.clear();
+        // The clips were drawn before this: show the deletion now, not at the next input.
+        ui.ctx().request_repaint();
     }
 
-    // --- Mouse: drag / release ---
+    // --- Drag / release ---
     let mut marquee: Option<Rect> = None;
     if let (Some(drag), Some(pos)) = (ps.drag.clone(), pointer.pos) {
         if pointer.any_down() {
@@ -455,26 +548,11 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                         let raw = (tick_of(pos.x) as i64 - grab).max(0) as Tick;
                         let dt = snap_round(raw, snap) as i64 - a.start as i64;
                         let dtr = track_of(pos.y) as i32 - a.track as i32;
-                        let base: Vec<Clip> = orig.iter().map(|(_, c)| *c).collect();
-                        let (dt, dtr) = seq_edit::clamp_clip_shift(&base, dt, dtr, tracks);
-                        for &(i, c) in &orig {
-                            if let Some(m) = clips.get_mut(i) {
-                                m.start = (c.start as i64 + dt) as Tick;
-                                m.track = (c.track as i32 + dtr) as u16;
-                            }
-                        }
+                        seq_edit::move_clips(clips, &orig, dt, dtr, tracks);
                     }
                 }
                 Drag::Resize { anchor, orig } => {
-                    if let Some(&(_, a)) = orig.iter().find(|(i, _)| *i == anchor) {
-                        let end = snap_round(tick_of(pos.x), snap).max(a.start + snap);
-                        let delta = (end - a.start) as i64 - a.len as i64;
-                        for &(i, c) in &orig {
-                            if let Some(m) = clips.get_mut(i) {
-                                m.len = (c.len as i64 + delta).max(snap as i64) as Tick;
-                            }
-                        }
-                    }
+                    seq_edit::resize_clips(clips, &orig, anchor, snap_round(tick_of(pos.x), snap), snap);
                 }
                 Drag::Marquee { from, additive, base } => {
                     let r = Rect::from_two_pos(from, pos);
@@ -485,9 +563,11 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                     }
                     set_selection(&mut ps.selected, v);
                 }
-                Drag::Erase => {
+                // The press already erased what it landed on.
+                Drag::Erase { .. } if pressed => {}
+                Drag::Erase { .. } => {
                     if let Some(i) = hit(clips, pos) {
-                        clips.remove(i);
+                        seq_edit::delete_clips(clips, &[i]);
                         ps.selected.clear();
                     }
                 }
@@ -602,6 +682,12 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             }
         }
         gp.rect_stroke(r, 5.0, if sel { Stroke::new(2.0_f32, Color32::WHITE) } else { Stroke::new(1.0_f32, color) });
+        // Grip at the right end: drag it to resize.
+        if r.width() > 36.0 && r.bottom() - head.bottom() > 8.0 {
+            for dx in [5.0, 9.0] {
+                vline(&gp, r.right() - dx, head.bottom() + 3.0, r.bottom() - 3.0, with_alpha(if sel { Color32::WHITE } else { color }, 150), 1.0);
+            }
+        }
     }
     if let Some(r) = marquee {
         gp.rect_filled(r, 0.0, with_alpha(pal().orange, 30));
@@ -651,16 +737,12 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     if let Some(tr) = toggle_mute {
         seq_edit::toggle_track_mute(project, tr);
     }
-    let anchor = match st.playlist.menu {
-        Some(TapMenu::Pattern(id)) => tiles.iter().find(|(t, _)| *t == id).map(|(_, r)| *r),
-        Some(TapMenu::Clip(i)) => project.arrangement.clips.get(i).map(|c| clip_rect(c).intersect(grid)),
-        None => None,
-    };
+    let anchor = st.playlist.menu.and_then(|id| tiles.iter().find(|(t, _)| *t == id).map(|(_, r)| *r));
     match anchor {
         Some(r) if ui.memory(|m| m.is_popup_open(menu_id)) => tap_menu(st, ui, menu_id, r, project),
         Some(_) => st.playlist.menu = None,
         None => {
-            // Pattern or clip gone (undo, deletion elsewhere): the menu goes too.
+            // Pattern gone (undo, deletion elsewhere): the menu goes too.
             if st.playlist.menu.take().is_some() && ui.memory(|m| m.is_popup_open(menu_id)) {
                 ui.memory_mut(|m| m.close_popup());
             }
@@ -670,41 +752,28 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     st.actions.extend(actions);
 }
 
-/// Double-tap menu (palette pattern or clip). Deleting goes through a menu, never
-/// straight from the double tap: a stray double touch must not remove anything.
+/// Double-tap menu of a palette pattern. Deleting a pattern goes through a menu, never
+/// straight from the double tap: a stray double touch must not remove all its clips.
 fn tap_menu(st: &mut SeqUi, ui: &mut Ui, id: egui::Id, anchor: Rect, project: &mut Project) {
-    let Some(menu) = st.playlist.menu else { return };
-    let pat = match menu {
-        TapMenu::Pattern(p) => p,
-        TapMenu::Clip(i) => project.arrangement.clips[i].pattern,
-    };
+    let Some(pat) = st.playlist.menu else { return };
     let Some(name) = project.pattern(pat).map(|p| p.name.clone()) else { return };
     let uses = project.arrangement.clips.iter().filter(|c| c.pattern == pat).count();
     let last = project.patterns.len() <= 1;
-    let on_clip = matches!(menu, TapMenu::Clip(_));
-    // The last pattern stays: its clips can still go, unless "Delete this clip" already does it.
+    // The last pattern stays: its clips can still go.
     let pattern_item = match (last, uses) {
         (false, 0) => Some(tr!("Supprimer le pattern", "Delete pattern").to_string()),
         (false, 1) => Some(tr!("Supprimer le pattern et son clip", "Delete pattern and its clip").to_string()),
         (false, n) => Some(trf!("Supprimer le pattern et ses {} clips", "Delete pattern and its {} clips", n)),
         (true, 0) => None,
-        (true, 1) if on_clip => None,
         (true, 1) => Some(tr!("Supprimer son clip", "Delete its clip").to_string()),
         (true, n) => Some(trf!("Supprimer ses {} clips", "Delete its {} clips", n)),
     };
-    let rows = if on_clip { 2 } else { 1 };
-    let (anchor, side) = menu_anchor(anchor, menu_height(rows), ui.ctx().screen_rect());
+    let (anchor, side) = menu_anchor(anchor, menu_height(1), ui.ctx().screen_rect());
     let anchor = ui.interact(anchor, id.with("anchor"), Sense::hover());
     let mut done = false;
     egui::popup_above_or_below_widget(ui, id, &anchor, side, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
         ui.set_min_width(260.0);
         skin::menu_caption(ui, &name.to_uppercase());
-        if let TapMenu::Clip(i) = menu
-            && skin::menu_item(ui, tr!("Supprimer ce clip", "Delete this clip"), pal().danger, false).clicked()
-        {
-            seq_edit::delete_clips(&mut project.arrangement.clips, &[i]);
-            done = true;
-        }
         match &pattern_item {
             Some(label) if skin::menu_item(ui, label, pal().danger, false).clicked() => {
                 if last {
@@ -774,10 +843,11 @@ fn overview(ui: &mut Ui, rect: Rect, ps: &mut PlaylistState, clips: &[Clip], tra
         p.rect_filled(Rect::from_min_max(rect.min, pos2(x_of(song_end as f32).min(rect.right()), rect.bottom())), 5.0, with_alpha(pal().orange, a));
     }
     let inner = rect.shrink2(vec2(0.0, 3.0));
+    // Rows overlap when there are many tracks: a clip stays at least 2 points high.
     let row = inner.height() / tracks.max(1) as f32;
     for c in clips {
         let y = inner.top() + c.track as f32 * row;
-        let r = Rect::from_min_max(pos2(x_of(c.start as f32), y), pos2(x_of((c.start + c.len) as f32).max(x_of(c.start as f32) + 1.5), y + row.max(1.5)));
+        let r = Rect::from_min_max(pos2(x_of(c.start as f32), y), pos2(x_of((c.start + c.len) as f32).max(x_of(c.start as f32) + 1.5), y + row.max(2.0)));
         p.rect_filled(r.intersect(rect), 0.0, with_alpha(id_color(c.pattern.0), 190));
     }
     let view = view_w / ps.zoom;
@@ -811,7 +881,7 @@ mod tests {
     fn tap_menu_stays_on_a_phone_screen() {
         // 2400 × 1080 px landscape phone at 2.625 px per point.
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(914.0, 411.0));
-        let h = menu_height(2);
+        let h = menu_height(1);
         let side = |top: f32| menu_anchor(Rect::from_min_size(pos2(300.0, top), vec2(900.0, 60.0)), h, screen);
         // Room below: below. Clip near the bottom: above, and fits.
         assert!(matches!(side(80.0).1, egui::AboveOrBelow::Below));
