@@ -1,6 +1,6 @@
 //! One-shot sampler: pre-allocated voices, pitch from the key (60 = original pitch).
 
-use crate::instrument::Instrument;
+use crate::instrument::{Instrument, voice_gains};
 use crate::sample::SampleData;
 use std::sync::Arc;
 
@@ -14,6 +14,9 @@ struct Voice {
     pos: f64,
     rate: f64,
     gain: f32,
+    /// Note pan gains (left, right).
+    gl: f32,
+    gr: f32,
     /// 1.0 = normal; < 1.0 = fading out.
     fade: f32,
     fading: bool,
@@ -37,6 +40,10 @@ impl Sampler {
 
 impl Instrument for Sampler {
     fn note_on(&mut self, key: u8, vel: u8) {
+        self.note_on_panned(key, vel, 0.0);
+    }
+
+    fn note_on_panned(&mut self, key: u8, vel: u8, pan: f32) {
         self.counter += 1;
         let idx = match self.voices.iter().position(|v| !v.active) {
             Some(i) => i,
@@ -49,11 +56,14 @@ impl Instrument for Sampler {
                 .map(|(i, _)| i)
                 .unwrap_or(0),
         };
+        let (gl, gr) = voice_gains(pan);
         self.voices[idx] = Voice {
             active: true,
             pos: 0.0,
             rate: 2f64.powf((key as f64 - 60.0) / 12.0),
             gain: (vel as f32 / 127.0).powf(1.5),
+            gl,
+            gr,
             fade: 1.0,
             fading: false,
             age: self.counter,
@@ -84,8 +94,8 @@ impl Instrument for Sampler {
                 }
                 let t = (v.pos - i as f64) as f32;
                 let g = v.gain * v.fade;
-                *l += (s.left[i] + (s.left[i + 1] - s.left[i]) * t) * g;
-                *r += (s.right[i] + (s.right[i + 1] - s.right[i]) * t) * g;
+                *l += (s.left[i] + (s.left[i + 1] - s.left[i]) * t) * g * v.gl;
+                *r += (s.right[i] + (s.right[i + 1] - s.right[i]) * t) * g * v.gr;
                 v.pos += v.rate;
                 if v.fading {
                     v.fade -= self.fade_step;
@@ -165,6 +175,19 @@ mod tests {
         s.note_off(60);
         let b = render(&mut s, 100);
         assert!(a.iter().chain(&b).all(|x| (x - gain).abs() < 1e-6));
+    }
+
+    #[test]
+    fn note_pan_per_voice() {
+        let mut s = sampler(vec![1.0; 1001]);
+        s.note_on_panned(60, 127, -1.0);
+        s.note_on_panned(60, 127, 0.5);
+        let mut l = vec![0.0; 4];
+        let mut r = vec![0.0; 4];
+        s.process(&mut l, &mut r);
+        // Hard left: (1, 0); half right: (0.5, 1).
+        assert!(l.iter().all(|x| (x - 1.5).abs() < 1e-6), "{l:?}");
+        assert!(r.iter().all(|x| (x - 1.0).abs() < 1e-6), "{r:?}");
     }
 
     #[test]

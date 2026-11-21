@@ -57,7 +57,7 @@ impl RecordedNote {
             start = crate::snap_round(start, grid);
             len = crate::snap_round(len, grid).max(grid);
         }
-        Note { start, len: len.max(STEP / 4), key: self.key, velocity: self.vel.max(1) }
+        Note { start, len: len.max(STEP / 4), key: self.key, velocity: self.vel.max(1), pan: 0 }
     }
 }
 
@@ -101,7 +101,7 @@ mod tests {
     }
 
     fn note(start: Tick, len: Tick) -> Note {
-        Note { start, len, key: 60, velocity: 100 }
+        Note { start, len, key: 60, velocity: 100, pan: 0 }
     }
 
     #[test]
@@ -205,7 +205,7 @@ mod tests {
         for (tick, vel, on) in [(0.0, 80, true), (480.0, 110, true), (960.0, 0, false)] {
             notes.extend(r.event(A, 60, vel, tick, tick, on).map(|n| n.to_note(OFF)));
         }
-        let n = |start, len, velocity| Note { start, len, key: 60, velocity };
+        let n = |start, len, velocity| Note { start, len, key: 60, velocity, pan: 0 };
         assert_eq!(notes, vec![n(0, 480, 80), n(480, 480, 110)]);
         assert_eq!(r.event(A, 60, 0, 1000.0, 1000.0, false), None);
     }
@@ -237,9 +237,9 @@ mod tests {
         let b = r.event(B, 60, 0, 720.0, 720.0, false).unwrap();
         let a64 = r.event(A, 64, 0, 960.0, 960.0, false).unwrap();
         let a60 = r.event(A, 60, 0, 1200.0, 1200.0, false).unwrap();
-        assert_eq!((b.channel, b.key, b.to_note(OFF)), (B, 60, Note { start: 240, len: 480, key: 60, velocity: 90 }));
-        assert_eq!((a64.channel, a64.to_note(OFF)), (A, Note { start: 480, len: 480, key: 64, velocity: 80 }));
-        assert_eq!((a60.channel, a60.to_note(OFF)), (A, Note { start: 0, len: 1200, key: 60, velocity: 100 }));
+        assert_eq!((b.channel, b.key, b.to_note(OFF)), (B, 60, Note { start: 240, len: 480, key: 60, velocity: 90, pan: 0 }));
+        assert_eq!((a64.channel, a64.to_note(OFF)), (A, Note { start: 480, len: 480, key: 64, velocity: 80, pan: 0 }));
+        assert_eq!((a60.channel, a60.to_note(OFF)), (A, Note { start: 0, len: 1200, key: 60, velocity: 100, pan: 0 }));
     }
 
     /// Project with a 4-bar pattern and a channel.

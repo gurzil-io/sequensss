@@ -516,7 +516,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                             Some(idx) => notes[idx],
                             None => {
                                 let start = snap_floor(t as Tick, snap);
-                                Note { start, len: ps.last_len.max(1), key: key_of(pos.y), velocity: 100 }
+                                Note { start, len: ps.last_len.max(1), key: key_of(pos.y), velocity: 100, pan: 0 }
                             }
                         };
                         if h.is_none() && brush.start < limit {
@@ -568,7 +568,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                             let key = key_of(pos.y);
                             let start = snap_floor(t as Tick, snap);
                             let len = ps.last_len.min(limit - start).max(1);
-                            notes.push(Note { start, len, key, velocity: 100 });
+                            notes.push(Note { start, len, key, velocity: 100, pan: 0 });
                             let idx = notes.len() - 1;
                             ps.selected = vec![idx];
                             let orig = snapshot_of(&notes, &ps.selected);
@@ -946,7 +946,7 @@ mod stretch_tests {
     use super::*;
 
     fn note(start: Tick, len: Tick) -> Note {
-        Note { start, len, key: 60, velocity: 100 }
+        Note { start, len, key: 60, velocity: 100, pan: 0 }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Subtractive synth: 2 oscillators (polyBLEP), SVF low-pass filter, ADSR, 8 voices.
 
-use crate::instrument::Instrument;
+use crate::instrument::{Instrument, voice_gains};
 use seq_model::{SynthParams, Wave};
 
 const VOICES: usize = 8;
@@ -20,6 +20,9 @@ struct Voice {
     stage: Stage,
     key: u8,
     vel: f32,
+    /// Note pan gains (left, right).
+    gl: f32,
+    gr: f32,
     phase1: f32,
     phase2: f32,
     inc1: f32,
@@ -77,6 +80,10 @@ fn osc(wave: Wave, phase: f32, dt: f32) -> f32 {
 
 impl Instrument for Synth {
     fn note_on(&mut self, key: u8, vel: u8) {
+        self.note_on_panned(key, vel, 0.0);
+    }
+
+    fn note_on_panned(&mut self, key: u8, vel: u8, pan: f32) {
         self.counter += 1;
         let idx = self
             .voices
@@ -98,10 +105,13 @@ impl Instrument for Synth {
         let f2 = f * 2f32.powf(self.params.osc2_detune / 12.0);
         let v = &mut self.voices[idx];
         let keep_env = if v.stage != Stage::Idle { v.env } else { 0.0 };
+        let (gl, gr) = voice_gains(pan);
         *v = Voice {
             stage: Stage::Attack,
             key,
             vel: vel as f32 / 127.0,
+            gl,
+            gr,
             phase1: 0.0,
             phase2: 0.0,
             inc1: (f / self.sr).min(0.49),
@@ -140,6 +150,7 @@ impl Instrument for Synth {
 
     fn process(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
         out_l.fill(0.0);
+        out_r.fill(0.0);
         let p = self.params;
         let sr = self.sr;
         let atk = 1.0 / (p.attack.max(0.0005) * sr);
@@ -150,7 +161,7 @@ impl Instrument for Synth {
         let k = 2.0 - 1.95 * p.resonance.clamp(0.0, 1.0);
         let mix = p.osc_mix.clamp(0.0, 1.0);
         for v in self.voices.iter_mut().filter(|v| v.stage != Stage::Idle) {
-            for out in out_l.iter_mut() {
+            for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
                 // Envelope
                 match v.stage {
                     Stage::Attack => {
@@ -195,10 +206,11 @@ impl Instrument for Synth {
                 let v2 = v.ic2 + a2 * v.ic1 + a3 * v3;
                 v.ic1 = 2.0 * v1 - v.ic1;
                 v.ic2 = 2.0 * v2 - v.ic2;
-                *out += v2 * v.env * v.vel * p.gain;
+                let s = v2 * v.env * v.vel * p.gain;
+                *l += s * v.gl;
+                *r += s * v.gr;
             }
         }
-        out_r.copy_from_slice(out_l);
     }
 }
 
@@ -220,5 +232,20 @@ mod tests {
             s.process(&mut l, &mut r);
         }
         assert!(l.iter().all(|x| x.abs() < 1e-6));
+    }
+
+    #[test]
+    fn centred_note_is_mono_and_panned_note_is_not() {
+        let mut s = Synth::new(SynthParams::default(), 48_000);
+        let mut l = vec![0.0; 2400];
+        let mut r = vec![0.0; 2400];
+        s.note_on(48, 100);
+        s.process(&mut l, &mut r);
+        assert_eq!(l, r);
+        let mut s = Synth::new(SynthParams::default(), 48_000);
+        s.note_on_panned(48, 100, 1.0);
+        s.process(&mut l, &mut r);
+        assert!(l.iter().all(|x| *x == 0.0));
+        assert!(r.iter().any(|x| x.abs() > 0.05));
     }
 }

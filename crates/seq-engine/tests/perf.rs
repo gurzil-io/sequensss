@@ -44,7 +44,7 @@ fn large_project() -> Project {
     for i in 0..32 {
         let pat = p.add_pattern(&format!("Pattern {i}"), len);
         for (c, &id) in ids.iter().enumerate() {
-            let notes = (0..10).map(|n| Note { start: (n * 6 + c as u64 % 4) * STEP, len: STEP, key: 40 + (n as u8 * 3 + c as u8) % 48, velocity: 100 }).collect();
+            let notes = (0..10).map(|n| Note { start: (n * 6 + c as u64 % 4) * STEP, len: STEP, key: 40 + (n as u8 * 3 + c as u8) % 48, velocity: 100, pan: 0 }).collect();
             p.pattern_mut(pat).unwrap().notes.insert(id, notes);
         }
     }

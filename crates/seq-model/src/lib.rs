@@ -277,6 +277,30 @@ pub struct Note {
     pub len: Tick,
     pub key: u8,
     pub velocity: u8,
+    /// Note pan, [`PAN_MIN`] (left) ..= [`PAN_MAX`] (right), 0 = centre (as MIDI CC10 − 64).
+    /// Applied on top of the channel pan. Not written when centred: older versions
+    /// read the file as is.
+    #[serde(default, skip_serializing_if = "is_centre")]
+    pub pan: i8,
+}
+
+/// Note pan range (MIDI CC10 value − 64).
+pub const PAN_MIN: i8 = -64;
+pub const PAN_MAX: i8 = 63;
+
+fn is_centre(pan: &i8) -> bool {
+    *pan == 0
+}
+
+/// Note pan as -1.0 (left) ..= 1.0 (right).
+pub fn pan_unit(pan: i8) -> f32 {
+    let p = pan.clamp(PAN_MIN, PAN_MAX) as f32;
+    if p < 0.0 { p / -(PAN_MIN as f32) } else { p / PAN_MAX as f32 }
+}
+
+/// MIDI CC10 value of a note pan (64 = centre).
+pub fn pan_cc(pan: i8) -> u8 {
+    (64 + pan as i16).clamp(0, 127) as u8
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -581,6 +605,19 @@ mod tests {
         let a = p.add_channel("a", ChannelKind::MidiOut { channel: 0, out: 0 }).unwrap();
         let b = p.add_pattern("b", 100);
         assert_ne!(a.0, b.0);
+    }
+
+    #[test]
+    fn note_pan_conversions() {
+        assert_eq!(pan_unit(0), 0.0);
+        assert_eq!(pan_unit(PAN_MIN), -1.0);
+        assert_eq!(pan_unit(PAN_MAX), 1.0);
+        assert_eq!(pan_unit(-32), -0.5);
+        assert_eq!(pan_cc(0), 64);
+        assert_eq!(pan_cc(PAN_MIN), 0);
+        assert_eq!(pan_cc(PAN_MAX), 127);
+        assert_eq!(pan_cc(i8::MIN), 0);
+        assert_eq!(pan_cc(i8::MAX), 127);
     }
 
     #[test]

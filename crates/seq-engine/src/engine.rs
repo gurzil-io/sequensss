@@ -184,6 +184,7 @@ struct Pending {
     chan: u16,
     key: u8,
     vel: u8,
+    pan: i8,
     /// End of the note, in ticks relative to the origin.
     end: f64,
 }
@@ -322,6 +323,9 @@ pub struct Engine {
     /// Start / Continue per output, sent just before the first pulse at or after the tick
     /// (from the origin).
     clock_cue: [Option<(f64, u8)>; MAX_MIDI_OUTS],
+    /// Last note pan sent (CC10) per MIDI output and channel; 0 until a panned note plays,
+    /// so a project without note pan sends no CC10 at all.
+    midi_pan: [[i8; 16]; MAX_MIDI_OUTS],
 
     metronome: bool,
     click: Click,
@@ -389,6 +393,7 @@ impl Engine {
             clock_next: 0.0,
             clock_last: 0.0,
             clock_cue: [None; MAX_MIDI_OUTS],
+            midi_pan: [[0; 16]; MAX_MIDI_OUTS],
             metronome: false,
             click: Click::new(sr as f32),
             live_channel: None,
@@ -909,8 +914,9 @@ impl Engine {
     }
 
     /// Incoming note for a channel (sequencer, MIDI in, preview): choke, then arpeggiator
-    /// or instrument.
-    fn send_on(&mut self, si: usize, key: u8, vel: u8, at: usize) {
+    /// or instrument. `pan`: the note's own pan (sequencer), `None` for live notes, which
+    /// play centred and leave a MIDI output's pan as it is. Arpeggios ignore note pan.
+    fn send_on(&mut self, si: usize, key: u8, vel: u8, pan: Option<i8>, at: usize) {
         let choke = self.slots[si].params.choke;
         if choke != 0 {
             for j in 0..self.slots.len() {
@@ -926,7 +932,7 @@ impl Engine {
         if self.slots[si].params.arp.enabled {
             self.arp_press(si, key, vel, at);
         } else {
-            self.raw_on(si, key, vel, at);
+            self.raw_on(si, key, vel, pan, at);
         }
     }
 
@@ -940,15 +946,26 @@ impl Engine {
     }
 
     /// Note sent directly to the instrument / MIDI output.
-    fn raw_on(&mut self, si: usize, key: u8, vel: u8, at: usize) {
+    fn raw_on(&mut self, si: usize, key: u8, vel: u8, pan: Option<i8>, at: usize) {
         let params = self.slots[si].params;
         match &mut self.slots[si].kind {
-            SlotKind::Audio(inst) => inst.note_on(key, vel),
+            SlotKind::Audio(inst) => match pan {
+                Some(p) if p != 0 => inst.note_on_panned(key, vel, pan_unit(p)),
+                _ => inst.note_on(key, vel),
+            },
             SlotKind::Midi => {
                 // Same rule as the audio mix: muted, or another channel is soloed.
                 let any_solo = self.slots.iter().any(|s| s.params.solo);
                 let audible = !params.mute && (!any_solo || params.solo);
                 if let (Some(ch), true) = (params.midi_channel, audible) {
+                    // Pan (CC10) right before a note whose pan differs from the last one sent.
+                    if let Some(p) = pan
+                        && let Some(last) = self.midi_pan.get_mut(params.midi_port as usize).map(|a| &mut a[ch as usize & 15])
+                        && *last != p
+                    {
+                        *last = p;
+                        self.midi_send(params.midi_port, [0xB0 | ch, 10, pan_cc(p)], at);
+                    }
                     self.midi_send(params.midi_port, [0x90 | ch, key & 0x7f, vel.clamp(1, 127)], at);
                     // No audio: the channel meter shows MIDI activity.
                     let v = vel as f32 / 127.0;
@@ -1077,7 +1094,7 @@ impl Engine {
                 self.slots[si].arp.remove_sounding(i);
                 self.raw_off(si, key, cur);
             }
-            self.raw_on(si, key, vel, cur);
+            self.raw_on(si, key, vel, None, cur);
             self.slots[si].arp.push_sounding(key, off);
         }
     }
@@ -1138,7 +1155,7 @@ impl Engine {
 
     fn live_on(&mut self, si: usize, key: u8, vel: u8) {
         self.remove_active_where(0, |a| a.live && a.slot as usize == si && a.key == key);
-        self.send_on(si, key, vel, 0);
+        self.send_on(si, key, vel, None, 0);
         self.push_active(Active { slot: si as u16, key, end: f64::INFINITY, live: true });
     }
 
@@ -1234,7 +1251,7 @@ impl Engine {
                 break;
             }
             let accent = c.next == 0;
-            self.pending.push(Pending { offset: f.max(0) as usize, chan: METRO, key: accent as u8, vel: 0, end: 0.0 });
+            self.pending.push(Pending { offset: f.max(0) as usize, chan: METRO, key: accent as u8, vel: 0, pan: 0, end: 0.0 });
             c.next += 1;
         }
     }
@@ -1276,7 +1293,7 @@ impl Engine {
         let si = si as usize;
         // Retrigger of the same key: cut the old one first.
         self.remove_active_where(cur, |a| !a.live && a.slot as usize == si && a.key == p.key);
-        self.send_on(si, p.key, p.vel, cur);
+        self.send_on(si, p.key, p.vel, Some(p.pan), cur);
         self.push_active(Active { slot: si as u16, key: p.key, end: p.end, live: false });
     }
 
@@ -1406,14 +1423,15 @@ struct Gather<'a> {
 }
 
 impl Gather<'_> {
-    fn push(&mut self, t: f64, end_t: f64, w: &Window, chan: u16, key: u8, vel: u8) {
+    #[allow(clippy::too_many_arguments)]
+    fn push(&mut self, t: f64, end_t: f64, w: &Window, chan: u16, key: u8, vel: u8, pan: i8) {
         if self.out.len() >= self.out.capacity() {
             return;
         }
         let d = t + w.base;
         let frame = (d * self.spt).ceil() as i64 - self.frames as i64;
         let offset = frame.clamp(0, self.n as i64 - 1) as usize;
-        self.out.push(Pending { offset, chan, key, vel, end: end_t + w.base });
+        self.out.push(Pending { offset, chan, key, vel, pan, end: end_t + w.base });
     }
 
     fn query(&mut self, w: Window) {
@@ -1427,7 +1445,7 @@ impl Gather<'_> {
                 }
                 if t > w.lo && t >= w.mn {
                     let accent = b % self.g.beats_per_bar.max(1) as i64 == 0;
-                    self.push(t, t, &w, METRO, accent as u8, 0);
+                    self.push(t, t, &w, METRO, accent as u8, 0, 0);
                 }
                 b += 1;
             }
@@ -1478,7 +1496,7 @@ impl Gather<'_> {
             }
             let t = offset + lt;
             let end_t = (t + e.len as f64).min(trunc);
-            self.push(t, end_t, w, e.channel, e.key, e.vel);
+            self.push(t, end_t, w, e.channel, e.key, e.vel, e.pan);
         }
     }
 }
@@ -1523,7 +1541,7 @@ mod tests {
         let pat = p.patterns[0].id;
         let pt = p.pattern_mut(pat).unwrap();
         pt.length = len_steps * STEP;
-        pt.notes.insert(ch, steps.iter().map(|&s| Note { start: s as u64 * STEP, len: STEP, key: 60, velocity: 100 }).collect());
+        pt.notes.insert(ch, steps.iter().map(|&s| Note { start: s as u64 * STEP, len: STEP, key: 60, velocity: 100, pan: 0 }).collect());
         (p, ch, pat)
     }
 
@@ -1660,7 +1678,7 @@ mod tests {
         let pat = p.patterns[0].id;
         let pt = p.pattern_mut(pat).unwrap();
         pt.length = 16 * STEP;
-        pt.notes.insert(ch, chord.iter().map(|&k| Note { start: 0, len: len_steps * STEP, key: k, velocity: 100 }).collect());
+        pt.notes.insert(ch, chord.iter().map(|&k| Note { start: 0, len: len_steps * STEP, key: k, velocity: 100, pan: 0 }).collect());
         (p, ch, pat)
     }
 
@@ -1763,7 +1781,7 @@ mod tests {
         p.channel_mut(a).unwrap().choke = 1;
         p.channel_mut(b).unwrap().choke = 1;
         let pat = p.patterns[0].id;
-        p.pattern_mut(pat).unwrap().notes.insert(a, vec![Note { start: 0, len: STEP, key: 60, velocity: 100 }]);
+        p.pattern_mut(pat).unwrap().notes.insert(a, vec![Note { start: 0, len: STEP, key: 60, velocity: 100, pan: 0 }]);
         let cut = Arc::new(Mutex::new(0));
         let (mut e, _h) = Engine::new(48_000, None, None);
         e.handle_cmd(EngineCmd::SetSlot(a, SlotKind::Audio(Box::new(Counter(Arc::new(Mutex::new(0)))))));
@@ -2319,7 +2337,7 @@ mod tests {
     #[test]
     fn midi_out_channel_port_and_delay() {
         // Tick 60 = frame 1500, ends at tick 80 = frame 2000.
-        let note = Note { start: 60, len: 20, key: 62, velocity: 100 };
+        let note = Note { start: 60, len: 20, key: 62, velocity: 100, pan: 0 };
         let (p, ids) = midi_out_project(&[(3, 1)], &[note]);
         let sr = 48_000.0;
         // One large callback (split into 512-frame sub-blocks): delay = latency + offset in the callback.
@@ -2339,7 +2357,7 @@ mod tests {
     #[test]
     fn midi_out_note_off_before_retrigger() {
         // Two back-to-back steps: off then on at the same frame.
-        let notes = [0, 1].map(|s| Note { start: s * STEP, len: STEP, key: 60, velocity: 80 });
+        let notes = [0, 1].map(|s| Note { start: s * STEP, len: STEP, key: 60, velocity: 80, pan: 0 });
         let (p, ids) = midi_out_project(&[(0, 0)], &notes);
         let (mut e, _h, mut rx) = midi_out_engine(&p, &ids);
         callback(&mut e, 12_288, 0.0);
@@ -2352,7 +2370,7 @@ mod tests {
 
     #[test]
     fn midi_out_stop_sends_note_off() {
-        let note = Note { start: 0, len: 8 * STEP, key: 48, velocity: 127 };
+        let note = Note { start: 0, len: 8 * STEP, key: 48, velocity: 127, pan: 0 };
         let (p, ids) = midi_out_project(&[(9, 2)], &[note]);
         let (mut e, mut h, mut rx) = midi_out_engine(&p, &ids);
         callback(&mut e, 1024, 0.005);
@@ -2367,7 +2385,7 @@ mod tests {
 
     #[test]
     fn midi_out_muted_channel_sends_no_note_on() {
-        let note = Note { start: 0, len: STEP, key: 60, velocity: 100 };
+        let note = Note { start: 0, len: STEP, key: 60, velocity: 100, pan: 0 };
         let (mut p, ids) = midi_out_project(&[(0, 0)], &[note]);
         p.channel_mut(ids[0]).unwrap().mute = true;
         let (mut e, _h, mut rx) = midi_out_engine(&p, &ids);
@@ -2377,7 +2395,7 @@ mod tests {
 
     #[test]
     fn midi_out_respects_solo() {
-        let note = Note { start: 0, len: STEP, key: 60, velocity: 100 };
+        let note = Note { start: 0, len: STEP, key: 60, velocity: 100, pan: 0 };
         let (mut p, ids) = midi_out_project(&[(0, 0), (1, 0)], &[note]);
         p.channel_mut(ids[0]).unwrap().solo = true;
         let (mut e, _h, mut rx) = midi_out_engine(&p, &ids);
@@ -2387,9 +2405,105 @@ mod tests {
         assert_eq!(on, vec![0x90]);
     }
 
+    /// Five steps, with the given note pans.
+    fn panned_steps(pans: [i8; 5]) -> Vec<Note> {
+        (0..5).map(|s| Note { start: s as Tick * STEP, len: STEP, key: 60, velocity: 100, pan: pans[s] }).collect()
+    }
+
+    #[test]
+    fn midi_out_note_pan_sends_cc10_before_the_note() {
+        let notes = panned_steps([0, -64, -64, 20, 0]);
+        let (mut p, ids) = midi_out_project(&[(2, 0), (5, 1)], &notes);
+        // The second channel only plays the last two notes.
+        p.patterns[0].make_mut().notes.insert(ids[1], notes[3..].to_vec());
+        let (mut e, mut h, mut rx) = midi_out_engine(&p, &ids);
+        callback(&mut e, 5 * STEP as usize * 25 + 1000, 0.0);
+        let got: Vec<(u8, [u8; 3])> = drain(&mut rx).iter().map(|m| (m.0, m.1)).collect();
+        let ch2: Vec<[u8; 3]> = got.iter().filter(|m| m.0 == 0).map(|m| m.1).collect();
+        assert_eq!(
+            ch2,
+            vec![
+                [0x92, 60, 100],
+                [0x82, 60, 0],
+                [0xB2, 10, 0],
+                [0x92, 60, 100],
+                [0x82, 60, 0],
+                // Same pan as the previous note: not sent again.
+                [0x92, 60, 100],
+                [0x82, 60, 0],
+                [0xB2, 10, 84],
+                [0x92, 60, 100],
+                [0x82, 60, 0],
+                // Back to the centre.
+                [0xB2, 10, 64],
+                [0x92, 60, 100],
+                [0x82, 60, 0],
+            ]
+        );
+        // Each output and channel has its own state.
+        let ch5: Vec<[u8; 3]> = got.iter().filter(|m| m.0 == 1).map(|m| m.1).collect();
+        assert_eq!(ch5, vec![[0xB5, 10, 84], [0x95, 60, 100], [0x85, 60, 0], [0xB5, 10, 64], [0x95, 60, 100], [0x85, 60, 0]]);
+        // Live notes leave the pan as it is.
+        h.send(EngineCmd::Preview { channel: ids[0], key: 64, vel: 90, on: true });
+        callback(&mut e, 64, 0.0);
+        assert!(drain(&mut rx).iter().all(|m| m.1[0] & 0xF0 != 0xB0));
+    }
+
+    #[test]
+    fn midi_out_without_note_pan_sends_no_cc() {
+        let (p, ids) = midi_out_project(&[(0, 0), (9, 1)], &panned_steps([0; 5]));
+        let (mut e, mut h, mut rx) = midi_out_engine(&p, &ids);
+        // Two loops of the pattern, the first note of the third, and a live note.
+        callback(&mut e, 2 * 16 * STEP as usize * 25 + 100, 0.0);
+        h.send(EngineCmd::Preview { channel: ids[0], key: 64, vel: 90, on: true });
+        callback(&mut e, 64, 0.0);
+        let got = drain(&mut rx);
+        assert_eq!(got.iter().filter(|m| m.1[0] & 0xF0 == 0x90).count(), 2 * (2 * 5 + 1) + 1);
+        assert!(got.iter().all(|m| m.1[0] & 0xF0 != 0xB0), "{got:?}");
+    }
+
+    #[test]
+    fn internal_instrument_pans_each_note_on_top_of_channel_pan() {
+        use crate::sample::SampleData;
+        use crate::sampler::Sampler;
+        // DC sample, one note per step: first frame of each step (left, right).
+        let frames = |pans: [i8; 5], channel_pan: f32| -> Vec<(f32, f32)> {
+            let mut p = Project::empty();
+            let pat = p.patterns[0].id;
+            let ch = p.add_channel("s", ChannelKind::Synth(SynthParams::default())).unwrap();
+            p.channel_mut(ch).unwrap().pan = channel_pan;
+            p.channel_mut(ch).unwrap().volume = 1.0;
+            p.pattern_mut(pat).unwrap().notes.insert(ch, panned_steps(pans));
+            let (mut e, _h) = Engine::new(48_000, None, None);
+            // Short sample: each note is over before the next one.
+            let sample = Arc::new(SampleData::from_mono(48_000, vec![0.5; 1000]));
+            e.handle_cmd(EngineCmd::SetSlot(ch, SlotKind::Audio(Box::new(Sampler::new(sample)))));
+            e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(&p))));
+            e.handle_cmd(EngineCmd::SetMode(PlayMode::Pattern(pat)));
+            e.handle_cmd(EngineCmd::Play);
+            let step = STEP as usize * 25;
+            let mut out = vec![0.0; 5 * step * 2];
+            e.process(&mut out, 2, 0.0);
+            (0..5).map(|s| (out[s * step * 2 + 2], out[s * step * 2 + 3])).collect()
+        };
+        let centred = frames([0; 5], 0.0);
+        let f = frames([0, PAN_MIN, PAN_MAX, -32, 0], 0.0);
+        assert_eq!(f[0], centred[0]);
+        let (l, r) = centred[0];
+        assert!(l > 0.1 && (l - r).abs() < 1e-6);
+        assert_eq!(f[1], (l, 0.0));
+        assert_eq!(f[2], (0.0, r));
+        assert!((f[3].0 - l).abs() < 1e-6 && (f[3].1 - r * 0.5).abs() < 1e-3, "{:?}", f[3]);
+        // On top of the channel pan: a channel panned right keeps its balance for a
+        // centred note, a note hard left is silent on the right.
+        let g = frames([0, PAN_MIN, 0, 0, 0], 0.5);
+        assert!(g[0].1 > g[0].0 && g[0].0 > 0.0);
+        assert_eq!(g[1], (g[0].0, 0.0));
+    }
+
     #[test]
     fn midi_out_stamps_callback_time_and_wakes_thread() {
-        let note = Note { start: 0, len: STEP, key: 60, velocity: 100 };
+        let note = Note { start: 0, len: STEP, key: 60, velocity: 100, pan: 0 };
         let (p, ids) = midi_out_project(&[(0, 0)], &[note]);
         let (mut e, _h, mut rx) = midi_out_engine(&p, &ids);
         let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
@@ -2413,7 +2527,7 @@ mod tests {
     #[test]
     fn midi_out_channel_change_releases_on_old_channel() {
         // As the app does it: SetSlot (kind changed), then SwapGraph.
-        let note = Note { start: 0, len: 8 * STEP, key: 60, velocity: 100 };
+        let note = Note { start: 0, len: 8 * STEP, key: 60, velocity: 100, pan: 0 };
         let (mut p, ids) = midi_out_project(&[(0, 0)], &[note]);
         let (mut e, mut h, mut rx) = midi_out_engine(&p, &ids);
         callback(&mut e, 1000, 0.0);
@@ -2431,7 +2545,7 @@ mod tests {
     fn midi_out_replaced_by_loading_sample_releases_notes() {
         // MIDI out → WAV file not decoded yet: the app swaps the graph and keeps the MIDI slot
         // until the sample is loaded.
-        let note = Note { start: 0, len: 8 * STEP, key: 60, velocity: 100 };
+        let note = Note { start: 0, len: 8 * STEP, key: 60, velocity: 100, pan: 0 };
         let (mut p, ids) = midi_out_project(&[(2, 1)], &[note]);
         let (mut e, mut h, mut rx) = midi_out_engine(&p, &ids);
         callback(&mut e, 1000, 0.0);
@@ -2445,7 +2559,7 @@ mod tests {
     #[test]
     fn instrument_replaced_while_playing() {
         // Synth → MIDI out → synth, as the app does it: SetSlot, then SwapGraph.
-        let note = Note { start: 0, len: 8 * STEP, key: 60, velocity: 100 };
+        let note = Note { start: 0, len: 8 * STEP, key: 60, velocity: 100, pan: 0 };
         let (mut p, ids) = midi_out_project(&[(0, 0)], &[note]);
         let id = ids[0];
         p.channel_mut(id).unwrap().kind = ChannelKind::Synth(SynthParams::default());
@@ -2581,7 +2695,7 @@ mod tests {
 
     #[test]
     fn clock_only_on_enabled_outputs() {
-        let note = Note { start: 0, len: STEP, key: 60, velocity: 100 };
+        let note = Note { start: 0, len: STEP, key: 60, velocity: 100, pan: 0 };
         let (mut p, ids) = midi_out_project(&[(0, 0), (1, 2)], &[note]);
         p.midi_outs = vec![None; 3];
         p.set_midi_clock(1, true);
@@ -2710,7 +2824,7 @@ mod tests {
     #[test]
     fn clock_ignores_swing() {
         let pulses = |swing: f32| {
-            let note = Note { start: STEP, len: STEP, key: 60, velocity: 100 };
+            let note = Note { start: STEP, len: STEP, key: 60, velocity: 100, pan: 0 };
             let (mut p, ids) = midi_out_project(&[(0, 0)], &[note]);
             p.swing = swing;
             p.set_midi_clock(0, true);
@@ -2869,7 +2983,7 @@ mod tests {
         let pat_b = p.add_pattern("B", 16 * STEP);
         p.pattern_mut(pat_b).unwrap().notes.insert(
             ch,
-            vec![Note { start: 0, len: STEP, key: 62, velocity: 100 }, Note { start: 8 * STEP, len: STEP, key: 64, velocity: 100 }],
+            vec![Note { start: 0, len: STEP, key: 62, velocity: 100, pan: 0 }, Note { start: 8 * STEP, len: STEP, key: 64, velocity: 100, pan: 0 }],
         );
         let (mut e, _h, log) = engine_with_probe(&p, ch, 48_000, PlayMode::Pattern(pat_a));
         run(&mut e, 5000, &[256]);

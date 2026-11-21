@@ -26,6 +26,8 @@ pub struct AbsNote {
     pub end: Tick,
     pub key: u8,
     pub vel: u8,
+    /// Note pan (0 = centre).
+    pub pan: i8,
 }
 
 /// A channel's notes over the whole song (same rules as the engine: clip repetition and
@@ -47,7 +49,7 @@ pub fn flatten_channel(p: &Project, channel: ChannelId, fallback: PatternId) -> 
                     continue;
                 }
                 let end = (local + n.len.max(1)).min(rep * plen + plen).min(clip_len);
-                out.push(AbsNote { start: at + local, end: at + end, key: n.key.min(127), vel: n.velocity.min(127) });
+                out.push(AbsNote { start: at + local, end: at + end, key: n.key.min(127), vel: n.velocity.min(127), pan: n.pan });
             }
             rep += 1;
         }
@@ -141,11 +143,11 @@ pub fn write_midi(path: &Path, p: &Project, fallback: PatternId) -> Result<()> {
                 free[(synths - 1) % free.len()]
             }
         };
-        // (tick, 0 = off / 1 = on, key, vel): at equal ticks, offs sort before ons.
-        let mut evs: Vec<(Tick, u8, u8, u8)> = Vec::with_capacity(notes.len() * 2);
+        // (tick, 0 = off / 1 = on, key, vel, pan): at equal ticks, offs sort before ons.
+        let mut evs: Vec<(Tick, u8, u8, u8, i8)> = Vec::with_capacity(notes.len() * 2);
         for n in &notes {
-            evs.push((n.start, 1, n.key, n.vel.max(1)));
-            evs.push((n.end, 0, n.key, 0));
+            evs.push((n.start, 1, n.key, n.vel.max(1), n.pan));
+            evs.push((n.end, 0, n.key, 0, 0));
         }
         evs.sort();
         let mut track = vec![TrackEvent {
@@ -153,15 +155,24 @@ pub fn write_midi(path: &Path, p: &Project, fallback: PatternId) -> Result<()> {
             kind: TrackEventKind::Meta(MetaMessage::TrackName(ch.name.as_bytes())),
         }];
         let mut last = 0;
-        for (t, on, key, vel) in evs {
-            let message = if on == 1 {
-                MidiMessage::NoteOn { key: u7::new(key), vel: u7::new(vel) }
-            } else {
-                MidiMessage::NoteOff { key: u7::new(key), vel: u7::new(0) }
-            };
+        // Same rule as the engine: pan (CC10) right before a note whose pan differs from
+        // the last one sent, so a project without note pan writes none.
+        let mut last_pan = 0;
+        let mut push = |t: Tick, message: MidiMessage| {
             let delta = (t - last).min(u28::max_value().as_int() as u64) as u32;
             track.push(TrackEvent { delta: u28::new(delta), kind: TrackEventKind::Midi { channel: u4::new(midi_ch), message } });
             last = t;
+        };
+        for (t, on, key, vel, pan) in evs {
+            if on == 1 {
+                if pan != last_pan {
+                    last_pan = pan;
+                    push(t, MidiMessage::Controller { controller: u7::new(10), value: u7::new(pan_cc(pan)) });
+                }
+                push(t, MidiMessage::NoteOn { key: u7::new(key), vel: u7::new(vel) });
+            } else {
+                push(t, MidiMessage::NoteOff { key: u7::new(key), vel: u7::new(0) });
+            }
         }
         track.push(TrackEvent { delta: u28::new(0), kind: TrackEventKind::Meta(MetaMessage::EndOfTrack) });
         smf.tracks.push(track);
@@ -248,7 +259,7 @@ mod tests {
         let pat = p.patterns[0].id;
         let ch = p.add_channel("Kick", ChannelKind::Sampler { source: SampleSource::Builtin(Drum::Kick) }).unwrap();
         // A single kick on beat 2 (0.5 s at 120 BPM).
-        p.pattern_mut(pat).unwrap().notes.insert(ch, vec![Note { start: PPQ as Tick, len: STEP, key: 60, velocity: 127 }]);
+        p.pattern_mut(pat).unwrap().notes.insert(ch, vec![Note { start: PPQ as Tick, len: STEP, key: 60, velocity: 127, pan: 0 }]);
         (p, pat)
     }
 
@@ -321,6 +332,7 @@ mod tests {
                 match message {
                     MidiMessage::NoteOn { key, vel } => out.push((t, channel.as_int(), true, key.as_int(), vel.as_int())),
                     MidiMessage::NoteOff { key, vel } => out.push((t, channel.as_int(), false, key.as_int(), vel.as_int())),
+                    MidiMessage::Controller { .. } => panic!("no control change expected"),
                     _ => {}
                 }
             }
@@ -386,7 +398,7 @@ mod tests {
         let ext = p.add_channel("Ext", ChannelKind::MidiOut { channel: 5, out: 1 }).unwrap();
         let s2 = p.add_channel("Bass", ChannelKind::Synth(SynthParams::default())).unwrap();
         let hi = p.add_channel("Hi", ChannelKind::MidiOut { channel: 200, out: 0 }).unwrap();
-        let note = Note { start: 0, len: STEP, key: 64, velocity: 100 };
+        let note = Note { start: 0, len: STEP, key: 64, velocity: 100, pan: 0 };
         for ch in [drum, s1, ext, s2, hi] {
             p.pattern_mut(pat).unwrap().notes.insert(ch, vec![note]);
         }
@@ -415,7 +427,7 @@ mod tests {
         let pat = p.patterns[0].id;
         for i in 0..18 {
             let ch = p.add_channel(&format!("S{i}"), ChannelKind::Synth(SynthParams::default())).unwrap();
-            p.pattern_mut(pat).unwrap().notes.insert(ch, vec![Note { start: 0, len: STEP, key: 60, velocity: 90 }]);
+            p.pattern_mut(pat).unwrap().notes.insert(ch, vec![Note { start: 0, len: STEP, key: 60, velocity: 90, pan: 0 }]);
         }
         let path = tmp_dir("mid-synths").join("t.mid");
         write_midi(&path, &p, pat).unwrap();
@@ -433,7 +445,7 @@ mod tests {
         let ext = p.add_channel("Ext", ChannelKind::MidiOut { channel: 0, out: 0 }).unwrap();
         let syn = p.add_channel("Lead", ChannelKind::Synth(SynthParams::default())).unwrap();
         for ch in [ext, syn] {
-            p.pattern_mut(pat).unwrap().notes.insert(ch, vec![Note { start: 0, len: STEP, key: 60, velocity: 90 }]);
+            p.pattern_mut(pat).unwrap().notes.insert(ch, vec![Note { start: 0, len: STEP, key: 60, velocity: 90, pan: 0 }]);
         }
         let path = tmp_dir("mid-collide").join("t.mid");
         write_midi(&path, &p, pat).unwrap();
@@ -456,16 +468,16 @@ mod tests {
         p.pattern_mut(pat).unwrap().notes.insert(
             ch,
             vec![
-                Note { start: 0, len: PPQ as Tick, key: 60, velocity: 1 },
+                Note { start: 0, len: PPQ as Tick, key: 60, velocity: 1, pan: 0 },
                 // Starts right where the previous one ends, same key: the off must come first.
-                Note { start: PPQ as Tick, len: STEP, key: 60, velocity: 127 },
+                Note { start: PPQ as Tick, len: STEP, key: 60, velocity: 127, pan: 0 },
                 // Odd step: swing delays it by STEP / 4, the length is kept.
-                Note { start: STEP * 5, len: 100, key: 62, velocity: 64 },
+                Note { start: STEP * 5, len: 100, key: 62, velocity: 64, pan: 0 },
                 // Last step (odd, so swung too), runs past the end of the pattern: truncated.
-                Note { start: bar - STEP, len: 10 * PPQ as Tick, key: 70, velocity: 90 },
+                Note { start: bar - STEP, len: 10 * PPQ as Tick, key: 70, velocity: 90, pan: 0 },
                 // Velocity 0: skipped; out-of-range velocity and key: clamped.
-                Note { start: STEP * 8, len: STEP, key: 61, velocity: 0 },
-                Note { start: STEP * 10, len: STEP, key: 200, velocity: 255 },
+                Note { start: STEP * 8, len: STEP, key: 61, velocity: 0, pan: 0 },
+                Note { start: STEP * 10, len: STEP, key: 200, velocity: 255, pan: 0 },
             ],
         );
         let path = tmp_dir("mid-notes").join("t.mid");
@@ -488,6 +500,45 @@ mod tests {
                 (STEP * 11, 0, false, 127, 0),
                 (bar - STEP + STEP / 4, 0, true, 70, 90),
                 (bar, 0, false, 70, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn midi_note_pan_writes_cc10_before_the_note() {
+        let mut p = Project::empty();
+        let pat = p.patterns[0].id;
+        let ch = p.add_channel("Ext", ChannelKind::MidiOut { channel: 4, out: 0 }).unwrap();
+        let n = |step: Tick, pan: i8| Note { start: step * STEP, len: STEP, key: 60, velocity: 100, pan };
+        p.pattern_mut(pat).unwrap().notes.insert(ch, vec![n(0, 0), n(1, -64), n(2, -64), n(3, 63), n(4, 0)]);
+        let path = tmp_dir("mid-pan").join("t.mid");
+        write_midi(&path, &p, pat).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let smf = Smf::parse(&bytes).unwrap();
+        let mut t = 0;
+        let mut got = Vec::new();
+        for e in &smf.tracks[1] {
+            t += e.delta.as_int() as u64;
+            if let TrackEventKind::Midi { channel, message } = e.kind {
+                assert_eq!(channel.as_int(), 4);
+                match message {
+                    MidiMessage::Controller { controller, value } => got.push((t / STEP, "cc", controller.as_int(), value.as_int())),
+                    MidiMessage::NoteOn { .. } => got.push((t / STEP, "on", 0, 0)),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(
+            got,
+            vec![
+                (0, "on", 0, 0),
+                (1, "cc", 10, 0),
+                (1, "on", 0, 0),
+                (2, "on", 0, 0),
+                (3, "cc", 10, 127),
+                (3, "on", 0, 0),
+                (4, "cc", 10, 64),
+                (4, "on", 0, 0),
             ]
         );
     }
@@ -553,7 +604,7 @@ mod tests {
         let mut p = Project::empty();
         let pat = p.patterns[0].id;
         let ch = p.add_channel("s", ChannelKind::Synth(SynthParams::default())).unwrap();
-        let n = |start, len| Note { start, len, key: 60, velocity: 100 };
+        let n = |start, len| Note { start, len, key: 60, velocity: 100, pan: 0 };
         // 0..960 overlaps 480..1440; two identical starts at 1920 (lengths 240 and 480).
         p.pattern_mut(pat).unwrap().notes.insert(ch, vec![n(0, 960), n(480, 960), n(1920, 240), n(1920, 480)]);
         let tracks = notes_of(&p, &dir.join("o.mid"));
@@ -572,7 +623,7 @@ mod tests {
         let ids: Vec<ChannelId> = (0..3).map(|_| p.add_channel("s", ChannelKind::Synth(SynthParams::default())).unwrap()).collect();
         for (i, &id) in ids.iter().enumerate() {
             let key = 60 + i as u8;
-            p.pattern_mut(pat).unwrap().notes.insert(id, vec![Note { start: 0, len: 480, key, velocity: 100 }]);
+            p.pattern_mut(pat).unwrap().notes.insert(id, vec![Note { start: 0, len: 480, key, velocity: 100, pan: 0 }]);
         }
         let keys = |p: &Project, name: &str| -> Vec<u8> {
             notes_of(p, &dir.join(name)).iter().map(|t| t[0].2).collect()
@@ -592,10 +643,10 @@ mod tests {
         let b = p.add_pattern("B", bar / 2);
         let kick = p.add_channel("Kick", ChannelKind::Sampler { source: SampleSource::Builtin(Drum::Kick) }).unwrap();
         let bass = p.add_channel("Bass", ChannelKind::Synth(SynthParams::default())).unwrap();
-        p.pattern_mut(a).unwrap().notes.insert(kick, vec![Note { start: 0, len: STEP, key: 36, velocity: 100 }]);
+        p.pattern_mut(a).unwrap().notes.insert(kick, vec![Note { start: 0, len: STEP, key: 36, velocity: 100, pan: 0 }]);
         p.pattern_mut(b).unwrap().notes.insert(
             bass,
-            vec![Note { start: 0, len: PPQ as Tick, key: 40, velocity: 80 }, Note { start: PPQ as Tick, len: 4 * PPQ as Tick, key: 43, velocity: 70 }],
+            vec![Note { start: 0, len: PPQ as Tick, key: 40, velocity: 80, pan: 0 }, Note { start: PPQ as Tick, len: 4 * PPQ as Tick, key: 43, velocity: 70, pan: 0 }],
         );
         // Kick: bars 0 and 2 (track 0). Bass: from bar 1, 1.5 bars long (track 1) -> pattern B (half a bar) plays 3 times.
         p.arrangement.clips.push(Clip { pattern: a, track: 0, start: 2 * bar, len: bar });

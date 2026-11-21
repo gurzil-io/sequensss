@@ -42,6 +42,16 @@ fn note_key(bytes: &[u8; 3]) -> Option<(u8, u8)> {
     matches!(bytes[0] & 0xF0, 0x80 | 0x90).then_some((bytes[0] & 0x0F, bytes[1]))
 }
 
+/// Pan change (CC10, sent before a panned note): channel.
+fn pan_channel(bytes: &[u8; 3]) -> Option<u8> {
+    (bytes[0] & 0xF0 == 0xB0 && bytes[1] == 10).then_some(bytes[0] & 0x0F)
+}
+
+/// Channel message (note, control change…): channel.
+fn voice_channel(bytes: &[u8; 3]) -> Option<u8> {
+    (0x80..0xF0).contains(&bytes[0]).then_some(bytes[0] & 0x0F)
+}
+
 /// System messages: clock, Start / Stop / Continue, SPP.
 fn is_system(bytes: &[u8; 3]) -> bool {
     bytes[0] >= 0xF0
@@ -52,9 +62,24 @@ fn insert(queue: &mut VecDeque<Pending>, mut p: Pending) {
     // latency reported by the audio driver may jitter from one callback to the next).
     // Likewise, clock and transport messages keep their order on a port. The two rules
     // are independent: a pulse is never held back by a note, nor a note by a pulse.
-    if let Some(k) = note_key(&p.bytes) {
+    // A pan change applies to the notes after it, and only to them: it never overtakes an
+    // earlier message on its port and channel, and a note never overtakes it.
+    if let Some(ch) = pan_channel(&p.bytes) {
+        for q in queue.iter().rev() {
+            if q.port == p.port && voice_channel(&q.bytes) == Some(ch) {
+                p.at = p.at.max(q.at);
+                break;
+            }
+        }
+    } else if let Some(k) = note_key(&p.bytes) {
         for q in queue.iter().rev() {
             if q.port == p.port && note_key(&q.bytes) == Some(k) {
+                p.at = p.at.max(q.at);
+                break;
+            }
+        }
+        for q in queue.iter().rev() {
+            if q.port == p.port && pan_channel(&q.bytes) == Some(k.0) {
                 p.at = p.at.max(q.at);
                 break;
             }
@@ -394,6 +419,28 @@ mod tests {
         got.clear();
         s.send_due(t + 50 * us, |p, b| got.push((p, *b)));
         assert_eq!(got, vec![(1, [0x80, 60, 0]), (1, [0x90, 60, 100])]);
+    }
+
+    #[test]
+    fn pan_change_stays_between_its_notes() {
+        let mut s = Scheduler::default();
+        let t = Instant::now();
+        let us = Duration::from_micros(1);
+        // A note (pan A) at the end of one callback; the next callback, with a lower latency
+        // estimate, stamps pan B and its note before it.
+        s.insert(Pending { at: t + 50 * us, port: 0, bytes: [0x92, 60, 100] });
+        s.insert(Pending { at: t + 20 * us, port: 0, bytes: [0xB2, 10, 0] });
+        s.insert(Pending { at: t + 20 * us, port: 0, bytes: [0x92, 62, 100] });
+        // Other channel, other port, other controller: not held back.
+        s.insert(Pending { at: t + 20 * us, port: 0, bytes: [0xB3, 10, 0] });
+        s.insert(Pending { at: t + 20 * us, port: 1, bytes: [0xB2, 10, 0] });
+        s.insert(Pending { at: t + 20 * us, port: 0, bytes: [0xB2, 7, 0] });
+        let mut got = Vec::new();
+        s.send_due(t + 40 * us, |p, b| got.push((p, *b)));
+        assert_eq!(got, vec![(0, [0xB3, 10, 0]), (1, [0xB2, 10, 0]), (0, [0xB2, 7, 0])]);
+        got.clear();
+        s.send_due(t + 50 * us, |p, b| got.push((p, *b)));
+        assert_eq!(got, vec![(0, [0x92, 60, 100]), (0, [0xB2, 10, 0]), (0, [0x92, 62, 100])]);
     }
 
     #[test]

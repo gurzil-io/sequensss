@@ -79,7 +79,7 @@ impl Project {
                         'o' => 85,
                         _ => return None,
                     };
-                    Some(Note { start: i as u64 * STEP, len: STEP, key: 60, velocity })
+                    Some(Note { start: i as u64 * STEP, len: STEP, key: 60, velocity, pan: 0 })
                 })
                 .collect();
             if !notes.is_empty() {
@@ -94,7 +94,7 @@ impl Project {
             let line = [(0, 36, 3), (4, 36, 2), (7, 48, 1), (8, 39, 3), (12, 41, 2), (14, 43, 2)];
             let notes = line
                 .iter()
-                .map(|&(s, k, l)| Note { start: s * STEP, len: l * STEP, key: k, velocity: 100 })
+                .map(|&(s, k, l)| Note { start: s * STEP, len: l * STEP, key: k, velocity: 100, pan: 0 })
                 .collect();
             p.pattern_mut(pat).unwrap().notes.insert(bass, notes);
 

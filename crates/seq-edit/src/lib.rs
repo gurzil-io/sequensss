@@ -186,7 +186,7 @@ pub fn set_step(project: &mut Project, pattern: PatternId, channel: ChannelId, s
     }
     let notes = pat.notes.entry(channel).or_default();
     if on {
-        notes.push(Note { start: a, len: STEP, key, velocity: 100 });
+        notes.push(Note { start: a, len: STEP, key, velocity: 100, pan: 0 });
     } else {
         notes.retain(|n| !(n.start >= a && n.start < b));
     }
@@ -549,7 +549,7 @@ pub fn bake_arp(notes: &mut Vec<Note>, sel: &[usize], p: &ArpParams, pattern_len
             None => pool.keys[..pool.n].to_vec(),
         };
         for (key, velocity) in picked {
-            out.push(Note { start: t, len: gate_len.min(pattern_len - t), key, velocity });
+            out.push(Note { start: t, len: gate_len.min(pattern_len - t), key, velocity, pan: 0 });
         }
         step += 1;
         t += rate;
@@ -673,7 +673,7 @@ pub fn paint_notes(notes: &mut Vec<Note>, brush: Note, key: u8, from: i64, to: i
         if notes.iter().any(|n| n.key == key && n.start < start + len && start < n.start + n.len) {
             continue;
         }
-        notes.push(Note { start, len, key, velocity: brush.velocity });
+        notes.push(Note { start, len, key, velocity: brush.velocity, pan: 0 });
         added.push(notes.len() - 1);
     }
     added
@@ -726,8 +726,8 @@ mod tests {
 
     #[test]
     fn paint_notes_tiles_and_skips_occupied() {
-        let brush = Note { start: STEP, len: 2 * STEP, key: 60, velocity: 90 };
-        let mut notes = vec![brush, Note { start: 5 * STEP, len: STEP, key: 60, velocity: 100 }];
+        let brush = Note { start: STEP, len: 2 * STEP, key: 60, velocity: 90, pan: 0 };
+        let mut notes = vec![brush, Note { start: 5 * STEP, len: STEP, key: 60, velocity: 100, pan: 0 }];
         // Slots -1..=3: start -STEP (outside pattern), STEP (occupied), 3, 5 (occupied), 7.
         let added = paint_notes(&mut notes, brush, 60, 3, -1, 16 * STEP);
         let starts: Vec<Tick> = added.iter().map(|&i| notes[i].start).collect();
@@ -737,7 +737,7 @@ mod tests {
         assert_eq!(paint_notes(&mut notes, brush, 62, 0, 0, 16 * STEP).len(), 1);
         // Last copy shortened at the end of the pattern.
         let mut n2 = Vec::new();
-        let b = Note { start: 0, len: 3 * STEP, key: 60, velocity: 100 };
+        let b = Note { start: 0, len: 3 * STEP, key: 60, velocity: 100, pan: 0 };
         paint_notes(&mut n2, b, 60, 0, 5, 4 * STEP);
         assert_eq!(n2.iter().map(|n| (n.start, n.len)).collect::<Vec<_>>(), vec![(0, 3 * STEP), (3 * STEP, STEP)]);
     }
@@ -772,8 +772,8 @@ mod tests {
         p.pattern_mut(pat).unwrap().notes.insert(
             ch,
             vec![
-                Note { start: STEP + 10, len: 500, key: 40, velocity: 90 },
-                Note { start: STEP * 2, len: 500, key: 40, velocity: 90 },
+                Note { start: STEP + 10, len: 500, key: 40, velocity: 90, pan: 0 },
+                Note { start: STEP * 2, len: 500, key: 40, velocity: 90, pan: 0 },
             ],
         );
         assert!(step_is_on(p.pattern(pat).unwrap(), ch, 1));
@@ -824,7 +824,7 @@ mod tests {
         p.patterns.clear();
         for i in 0..n {
             let id = p.add_pattern(&format!("P{i}"), notes * STEP);
-            let ns = (0..notes).map(|t| Note { start: t * STEP, len: STEP, key: 60, velocity: 100 }).collect();
+            let ns = (0..notes).map(|t| Note { start: t * STEP, len: STEP, key: 60, velocity: 100, pan: 0 }).collect();
             p.pattern_mut(id).unwrap().notes.insert(ch, ns);
         }
         (p, ch)
@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     fn n(start: Tick, len: Tick, key: u8) -> Note {
-        Note { start, len, key, velocity: 100 }
+        Note { start, len, key, velocity: 100, pan: 0 }
     }
 
     #[test]
