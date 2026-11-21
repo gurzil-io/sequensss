@@ -54,7 +54,12 @@ pub fn set(theme: Theme) {
 
 /// Colors of the current theme.
 pub fn pal() -> &'static Palette {
-    match get() {
+    palette(get())
+}
+
+/// Colors of `theme`.
+pub fn palette(theme: Theme) -> &'static Palette {
+    match theme {
         Theme::Retro => &RETRO,
         Theme::Display => &DISPLAY,
     }
@@ -202,10 +207,17 @@ pub struct Palette {
     pub row_line: Color32,
     /// Piano roll and playlist grid ground.
     pub grid_bg: Color32,
-    /// Bottom of a pressed cream button: mix(cream-bot, ink, 0.08) in skin::paint_button.
+    /// Bottom of a pressed cream button (Retro: mix(cream-bot, ink, 0.08)).
     pub cream_press: Color32,
-    /// Text on the grey active segment (6.4:1 on seg-on); on-state knob of a pill switch.
+    /// Text on the grey active segment (6.4:1 on seg-on).
     pub white: Color32,
+    /// On-state knob of a pill switch (on the orange track).
+    pub switch_knob: Color32,
+    /// Scroll bar handle (rack overview, egui scroll areas) and its outline.
+    pub thumb: Color32,
+    pub thumb_edge: Color32,
+    /// Strokes of egui's own widgets: check marks, combo arrows, scroll bar handles.
+    pub widget_fg: Color32,
     /// Channel palette 5. Literal in theme::PALETTE.
     pub teal: Color32,
     /// Channel palette 6. Literal in theme::PALETTE.
@@ -299,6 +311,11 @@ pub const RETRO: Palette = Palette {
     grid_bg: hex(0x2b2520),
     cream_press: hex(0xc0b294),
     white: hex(0xffffff),
+    switch_knob: hex(0xffffff),
+    // Color32::from_white_alpha(40) and (110), premultiplied (egui's gamma-aware values).
+    thumb: Color32::from_rgba_premultiplied(110, 110, 110, 40),
+    thumb_edge: Color32::from_rgba_premultiplied(175, 175, 175, 110),
+    widget_fg: hex(0xefe6d2),
     teal: hex(0x8fd0c4),
     terracotta: hex(0xd98a6c),
     hover_tile: hex(0x5a4e43),
@@ -382,6 +399,11 @@ pub const DISPLAY: Palette = Palette {
     grid_bg: hex(0x0a0d0c),
     cream_press: hex(0x1d1609),
     white: hex(0xfff3dc),
+    switch_knob: hex(0x1a0f02),
+    // A faint amber tint, and with_alpha(#ffc06a, 230), premultiplied.
+    thumb: Color32::from_rgba_premultiplied(40, 25, 8, 20),
+    thumb_edge: Color32::from_rgba_premultiplied(244, 183, 101, 230),
+    widget_fg: hex(0xffa63d),
     teal: hex(0x6dffc8),
     terracotta: hex(0xff8a62),
     hover_tile: hex(0x1a2220),
@@ -513,7 +535,7 @@ pub fn apply(ctx: &egui::Context) {
         s.bg_fill = bg;
         s.weak_bg_fill = bg;
         s.bg_stroke = Stroke::new(1.0_f32, pal().edge);
-        s.fg_stroke = Stroke::new(1.5_f32, pal().text);
+        s.fg_stroke = Stroke::new(1.5_f32, pal().widget_fg);
         s.rounding = Rounding::same(7.0);
     }
     w.hovered.bg_stroke = Stroke::new(1.0_f32, pal().orange);
@@ -532,14 +554,24 @@ mod tests {
         assert_eq!(Theme::from_code("neon"), None);
     }
 
+    // Pure: the current theme is global and tests run in parallel, so they don't switch it.
     #[test]
-    fn switching_changes_the_palette() {
-        set(Theme::Display);
-        assert!(screen());
-        assert_eq!(pal().bg, DISPLAY.bg);
-        set(Theme::Retro);
-        assert!(!screen());
-        assert_eq!(pal().bg, RETRO.bg);
+    fn each_theme_has_its_palette() {
+        assert!(palette(Theme::Display).screen);
+        assert_eq!(palette(Theme::Display).bg, DISPLAY.bg);
+        assert!(!palette(Theme::Retro).screen);
+        assert_eq!(palette(Theme::Retro).bg, RETRO.bg);
         assert_ne!(RETRO.bg, DISPLAY.bg);
+    }
+
+    // Retro colors that used to be literals in skin.rs and rack.rs, so it looks the same.
+    #[test]
+    fn retro_keeps_its_former_literals() {
+        assert_eq!(RETRO.cream_press, mix(RETRO.cream_bot, RETRO.ink, 0.08));
+        assert_eq!(RETRO.thumb, Color32::from_white_alpha(40));
+        assert_eq!(RETRO.thumb_edge, Color32::from_white_alpha(110));
+        assert_eq!(RETRO.switch_knob, Color32::WHITE);
+        assert_eq!(RETRO.widget_fg, RETRO.text);
+        assert_eq!(DISPLAY.thumb_edge, with_alpha(hex(0xffc06a), 230));
     }
 }

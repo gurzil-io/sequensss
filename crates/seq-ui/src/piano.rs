@@ -997,6 +997,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     }
     for (i, n) in notes.iter().enumerate() {
         let x = x_of(n.start as f64) + 2.0;
+        // Off screen: skip (the lane redraws during playback).
+        if x + 10.0 < vel.left() || x > vel.right() {
+            continue;
+        }
         let c = if is_sel(i) { Color32::WHITE } else { color };
         if pan_lane {
             // From the centre line: up = right, down = left.
@@ -1007,14 +1011,15 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             let h = (n.velocity as f32 / 127.0) * (vel.height() - 8.0);
             let r = Rect::from_min_max(pos2(x, vel.bottom() - 4.0 - h), pos2(x + 10.0, vel.bottom() - 4.0));
             if screen() {
-                // Display: a stack of LED segments, unlit ones faint up to the top.
-                let full = vel.height() - 8.0;
+                // Display: lit LED segments, then one faint bar up to the top for the unlit ones.
+                let top = vel.bottom() - 4.0 - (vel.height() - 8.0);
                 let mut y = vel.bottom() - 4.0;
-                while y - 3.0 >= vel.bottom() - 4.0 - full {
-                    let seg = Rect::from_min_max(pos2(x, y - 3.0), pos2(x + 10.0, y));
-                    let lit = y - 3.0 >= r.top() - 0.5;
-                    vp.rect_filled(seg, 0.5, if lit { c } else { with_alpha(c, 28) });
+                while y - 3.0 >= top && y - 3.0 >= r.top() - 0.5 {
+                    vp.rect_filled(Rect::from_min_max(pos2(x, y - 3.0), pos2(x + 10.0, y)), 0.5, c);
                     y -= 5.0;
+                }
+                if y - 3.0 >= top {
+                    vp.rect_filled(Rect::from_min_max(pos2(x, top), pos2(x + 10.0, y)), 0.5, with_alpha(c, 28));
                 }
                 continue;
             }

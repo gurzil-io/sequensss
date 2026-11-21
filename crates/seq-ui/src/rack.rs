@@ -624,15 +624,17 @@ fn hscroll(st: &mut SeqUi, ui: &mut Ui, rect: Rect, c: &Cols, pointer: &Pointer,
     p.rect_filled(track, 5.0, pal().inner);
     if c.steps > 0 {
         let end = x_of(c.offset(c.steps - 1) + c.cw);
-        p.rect_filled(Rect::from_min_max(track.min, pos2(end, track.bottom())), 5.0, with_alpha(pal().orange, 45));
+        // Display: fainter, so the thumb outline stands out instead of a solid amber pill.
+        let a = if screen() { 6 } else { 45 };
+        p.rect_filled(Rect::from_min_max(track.min, pos2(end, track.bottom())), 5.0, with_alpha(pal().orange, a));
     }
     for b in 1..c.total.div_ceil(c.spb) {
         let x = x_of(c.offset(b * c.spb)) - BGAP * k / 2.0;
         crate::widgets::vline(p, x, track.top() + 3.0, track.bottom() - 3.0, Color32::from_white_alpha(28), 1.0);
     }
     let thumb = Rect::from_min_max(pos2(x_of(c.sx), track.top()), pos2(x_of(c.sx + c.view).min(track.right()), track.bottom()));
-    p.rect_filled(thumb, 5.0, Color32::from_white_alpha(40));
-    p.rect_stroke(thumb, 5.0, Stroke::new(1.0_f32, Color32::from_white_alpha(110)));
+    p.rect_filled(thumb, 5.0, pal().thumb);
+    p.rect_stroke(thumb, 5.0, Stroke::new(1.0_f32, pal().thumb_edge));
 
     let resp = ui.interact(track.expand2(vec2(0.0, 4.0)), ui.id().with("rack_hscroll"), Sense::click_and_drag());
     let rs = &mut st.rack;

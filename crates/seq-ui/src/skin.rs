@@ -197,7 +197,7 @@ pub fn paint_button(p: &Painter, rect: Rect, r: f32, kind: Kind, selected: bool,
     let lift = |c: Color32| if hovered && enabled && !pressed { mix(c, Color32::WHITE, 0.07) } else { c };
     let fg = match kind {
         Kind::Cream => {
-            let (t, b) = if pressed { (pal().cream_bot, mix(pal().cream_bot, pal().ink, 0.08)) } else { (lift(pal().cream_top), lift(pal().cream_bot)) };
+            let (t, b) = if pressed { (pal().cream_bot, pal().cream_press) } else { (lift(pal().cream_top), lift(pal().cream_bot)) };
             if selected {
                 glow(p, rect, r, pal().orange, 6.0);
             }
@@ -241,6 +241,17 @@ pub fn paint_button(p: &Painter, rect: Rect, r: f32, kind: Kind, selected: bool,
 #[allow(clippy::too_many_arguments)]
 fn paint_screen_button(p: &Painter, rect: Rect, r: f32, kind: Kind, selected: bool, pressed: bool, hovered: bool, enabled: bool) -> Color32 {
     let c = pal();
+    if !enabled {
+        // Unlit: a dark key with a faint outline and a grey label, whatever its kind (a dimmed
+        // amber outline would still read as active on the black screen).
+        p.rect_filled(rect, r, c.dark_tile);
+        if kind == Kind::Ghost {
+            dashed_rect(p, rect, c.edge);
+        } else {
+            p.rect_stroke(rect, r, Stroke::new(1.0_f32, c.edge));
+        }
+        return with_alpha(c.text_dimmer, 150);
+    }
     let fill = |base: Color32| {
         if pressed {
             mix(base, c.bg, 0.35)
@@ -293,7 +304,7 @@ fn paint_screen_button(p: &Painter, rect: Rect, r: f32, kind: Kind, selected: bo
             c.ink
         }
     };
-    if enabled { fg } else { with_alpha(fg, 90) }
+    fg
 }
 
 /// Generic button: `content` draws inside the rect with the given color.
@@ -527,7 +538,7 @@ pub fn pill_switch(ui: &mut Ui, on: &mut bool, size: Vec2, labels: Option<(&str,
     let kx = rect.left() + r + (rect.width() - 2.0 * r) * anim;
     let kc = pos2(kx, rect.center().y);
     p.circle_filled(kc + vec2(0.0, 1.5), kr, Color32::from_black_alpha(90));
-    p.circle_filled(kc, kr, mix(pal().seg_on, Color32::WHITE, anim));
+    p.circle_filled(kc, kr, mix(pal().seg_on, pal().switch_knob, anim));
     p.circle_stroke(kc, kr, Stroke::new(1.0_f32, pal().edge));
     if let Some((l_on, l_off)) = labels {
         let (text, pos, align, col) = if *on {

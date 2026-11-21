@@ -495,7 +495,14 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     for tr in 0..tracks {
         let y = y_of(tr);
         let bg = if tr % 2 == 1 { pal().inner_alt } else { pal().inner };
-        gp.rect_filled(Rect::from_min_max(pos2(grid.left(), y), pos2(grid.right(), y + th)), 0.0, if is_muted(tr) { mix(bg, Color32::BLACK, 0.3) } else { bg });
+        let lane = Rect::from_min_max(pos2(grid.left(), y), pos2(grid.right(), y + th));
+        if is_muted(tr) && screen() {
+            // Display: darkening a near-black lane would not show, so it is hatched.
+            gp.rect_filled(lane, 0.0, bg);
+            hatch(&gp, lane, with_alpha(pal().ink, 40));
+        } else {
+            gp.rect_filled(lane, 0.0, if is_muted(tr) { mix(bg, Color32::BLACK, 0.3) } else { bg });
+        }
         // Mute button at the start of the lane, like the rack's.
         let row = Rect::from_min_max(pos2(lanes.left(), y), pos2(lanes.right(), y + th));
         if !row.intersects(lanes) {
@@ -716,5 +723,20 @@ mod tests {
         assert!(r.top() - h >= screen.top());
         // A long clip does not stretch the menu.
         assert_eq!(r.width(), 260.0);
+    }
+}
+
+/// Diagonal hatching over `rect` (muted lane, Display theme).
+fn hatch(p: &egui::Painter, rect: Rect, color: Color32) {
+    let p = p.with_clip_rect(rect.intersect(p.clip_rect()));
+    if p.clip_rect().is_negative() {
+        return;
+    }
+    let h = rect.height();
+    let stroke = Stroke::new(1.0_f32, color);
+    let mut x = ((p.clip_rect().left() - h) / 10.0).floor() * 10.0;
+    while x < p.clip_rect().right() {
+        p.line_segment([pos2(x, rect.bottom()), pos2(x + h, rect.top())], stroke);
+        x += 10.0;
     }
 }
