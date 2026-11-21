@@ -8,7 +8,8 @@
 //! space = notes of the last used length. Pitch follows the finger.
 //!
 //! Touch: two fingers scroll and zoom. One finger holding a note still while another one
-//! slides up or down changes the active parameter of that note.
+//! slides up or down changes the active parameter of that note, or of all the selected
+//! notes when it is one of them (the same amount added to each).
 
 use crate::skin::{self, Kind};
 use crate::theme::*;
@@ -186,6 +187,12 @@ fn start_multi(fingers: &Fingers, press: Option<(usize, Pos2, f64)>, now: f64, g
     } else {
         Multi::View
     }
+}
+
+/// Notes a parameter gesture on `note` edits: the selection if the note is part of it,
+/// otherwise the note alone (which becomes the selection).
+fn gesture_targets(selected: &[usize], note: usize) -> Vec<usize> {
+    if selected.contains(&note) { selected.to_vec() } else { vec![note] }
 }
 
 /// Change of `param` for a vertical slide of `dy` points (down > 0, as on screen): up =
@@ -539,7 +546,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     // --- Parameter gesture: one finger holds a note, another slides up or down ---
     if let Multi::Param { note, orig: orig @ None, .. } = &mut ps.multi {
         if *note < notes.len() {
-            ps.selected = vec![*note];
+            ps.selected = gesture_targets(&ps.selected, *note);
             *orig = Some(ps.selected.iter().map(|&i| (i, notes[i])).collect());
         } else {
             ps.multi = Multi::View;
@@ -1277,6 +1284,40 @@ mod gesture_tests {
         // Second finger outside the grid (keyboard, lane, side panel).
         assert_eq!(second_lands(pos2(200.0, 100.0), pos2(50.0, 300.0), 1.5, true), Multi::View);
         assert_eq!(second_lands(pos2(200.0, 100.0), pos2(600.0, 700.0), 1.5, true), Multi::View);
+    }
+
+    #[test]
+    fn gesture_edits_the_selection_it_belongs_to() {
+        assert_eq!(gesture_targets(&[1, 4, 6], 4), vec![1, 4, 6]);
+        assert_eq!(gesture_targets(&[1, 4, 6], 5), vec![5]);
+        assert_eq!(gesture_targets(&[], 2), vec![2]);
+    }
+
+    #[test]
+    fn several_notes_change_by_the_same_amount() {
+        let n = |start: Tick, len: Tick, velocity: u8, pan: i8| Note { start, len, key: 60 + (start / STEP) as u8, velocity, pan };
+        let start = vec![n(0, STEP, 100, 0), n(STEP, 2 * STEP, 60, -20), n(2 * STEP, STEP, 30, 50), n(3 * STEP, STEP, 90, 0)];
+        let sel = gesture_targets(&[0, 1, 2], 1);
+        let orig: Vec<(usize, Note)> = sel.iter().map(|&i| (i, start[i])).collect();
+        let slide = |param: NoteParam, dy: f32| {
+            let mut notes = start.clone();
+            seq_edit::adjust_param(&mut notes, &orig, param, gesture_delta(param, dy, STEP), seq_edit::min_note_len(STEP), 16 * STEP);
+            notes
+        };
+        // Up 90 points: velocity +30, each note clamped on its own; the unselected one stays.
+        let v = slide(NoteParam::Velocity, -90.0);
+        assert_eq!(v.iter().map(|n| n.velocity).collect::<Vec<_>>(), vec![127, 90, 60, 90]);
+        // Down: pan -10 on each.
+        let p = slide(NoteParam::Pan, 30.0);
+        assert_eq!(p.iter().map(|n| n.pan).collect::<Vec<_>>(), vec![-10, -30, 40, 0]);
+        // Up two grid steps: every selected note two steps longer.
+        let l = slide(NoteParam::Length, -48.0);
+        assert_eq!(l.iter().map(|n| n.len).collect::<Vec<_>>(), vec![3 * STEP, 4 * STEP, 3 * STEP, STEP]);
+        // Only the active parameter changes.
+        for (a, b) in [&v, &p, &l].into_iter().flat_map(|ns| ns.iter().zip(&start)) {
+            assert_eq!((a.start, a.key), (b.start, b.key));
+        }
+        assert!(v.iter().zip(&start).all(|(a, b)| (a.len, a.pan) == (b.len, b.pan)));
     }
 
     #[test]
