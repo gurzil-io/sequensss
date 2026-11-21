@@ -996,7 +996,6 @@ fn drum_grid(ui: &mut egui::Ui, current: Option<Drum>) -> Option<Drum> {
     picked
 }
 
-/// Engraved vertical separator.
 /// Display theme: faint scanlines and a darker rim, painted over everything (input passes through).
 fn screen_overlay(ctx: &egui::Context) {
     let rect = ctx.screen_rect();
@@ -1014,6 +1013,7 @@ fn screen_overlay(ctx: &egui::Context) {
     }
 }
 
+/// Engraved vertical separator.
 fn groove(ui: &mut egui::Ui) {
     let (r, _) = ui.allocate_exact_size(vec2(4.0, 44.0), Sense::hover());
     let p = ui.painter();

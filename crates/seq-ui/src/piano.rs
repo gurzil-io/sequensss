@@ -1090,8 +1090,6 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     st.actions.extend(actions);
 }
 
-/// Full-screen side panel: picks the active parameter, shows its value for the selected
-/// notes (or their range) and how many are selected. Never changes the selection.
 /// Display theme: a keyboard row drawn as segment-display cells, lit amber for white keys,
 /// faint for black keys (and for the labelled rows, so the label reads on top).
 fn screen_key(p: &egui::Painter, r: Rect, key: u8, pressed: bool, labelled: bool) {
@@ -1108,6 +1106,8 @@ fn screen_key(p: &egui::Painter, r: Rect, key: u8, pressed: bool, labelled: bool
     }
 }
 
+/// Full-screen side panel: picks the active parameter, shows its value for the selected
+/// notes (or their range) and how many are selected. Never changes the selection.
 fn side_panel(ui: &Ui, rect: Rect, param: &mut NoteParam, notes: &[Note], selected: &[usize]) {
     let p = ui.painter();
     p.rect_filled(rect, 8.0, pal().inner);
