@@ -1,5 +1,8 @@
 //! Piano roll: keyboard, grid, notes, tools (draw / select / erase / brush),
-//! multi-selection, copy/paste, velocity lane, "Arpeggiate".
+//! multi-selection, copy/paste, velocity / pan lane, "Arpeggiate".
+//!
+//! Active note parameter (velocity, length, pan): chosen in the side panel when the piano
+//! roll is full screen, otherwise by tapping the lane label, which cycles through them.
 //!
 //! Brush: press on a note then drag = end-to-end copies of that note; on empty
 //! space = notes of the last used length. Pitch follows the finger.
@@ -13,12 +16,17 @@ use crate::widgets::{Pointer, hline, vline};
 use crate::{EditCmd, Editor, PanelId, PlaybackInfo, SeqUi, UiAction};
 use crate::icons::Icon;
 use eframe::egui::{self, Align2, Color32, Event, Pos2, Rect, Sense, Stroke, TouchId, TouchPhase, Ui, pos2, vec2};
-use seq_edit::{snap_floor, snap_round};
+use seq_edit::{NoteParam, snap_floor, snap_round};
 use seq_i18n::{tr, trf};
 use seq_model::*;
 
 const KB_W: f32 = 72.0;
 const VEL_H: f32 = 56.0;
+/// Side panel (full screen): width, height of the parameter buttons; the panel only
+/// appears when the piano roll is at least `SIDE_MIN_W` wide.
+const SIDE_W: f32 = 176.0;
+const PARAM_BTN_H: f32 = 60.0;
+const SIDE_MIN_W: f32 = 640.0;
 const EDGE_PX: f32 = 8.0;
 /// Touch: the resize handle reaches this far inside a note (at most 40% of its width)...
 const EDGE_TOUCH_IN: f32 = 22.0;
@@ -45,7 +53,8 @@ enum Drag {
     Resize { anchor: usize, orig: Vec<(usize, Note)> },
     /// Selection rectangle.
     Marquee { from: Pos2, additive: bool, base: Vec<usize> },
-    Velocity,
+    /// Drawing in the lane under the grid (velocity or pan).
+    Lane(NoteParam),
     Erase,
     /// Press on the keyboard: plays `key`; beyond a few points of vertical drag,
     /// scrolls the octaves (`y0`, `sy0` = starting position and scroll).
@@ -65,6 +74,8 @@ pub struct PianoState {
     key_h: f32,
     snap: Tick,
     pub tool: Tool,
+    /// Active note parameter (side panel, lane, two-finger gesture).
+    pub(crate) param: NoteParam,
     last_len: Tick,
     drag: Option<Drag>,
     /// Sorted indices of the selected notes.
@@ -144,6 +155,7 @@ impl Default for PianoState {
             key_h: 22.0,
             snap: STEP,
             tool: Tool::Draw,
+            param: NoteParam::Velocity,
             last_len: STEP,
             drag: None,
             selected: Vec::new(),
@@ -245,7 +257,13 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         st.toggle_focus(PanelId::Piano);
     }
 
-    let area = res.body.shrink(10.0);
+    let mut area = res.body.shrink(10.0);
+    // Full screen: side panel for the active parameter, on the right.
+    let side = (st.focus == Some(PanelId::Piano) && area.width() >= SIDE_MIN_W).then(|| {
+        let r = Rect::from_min_max(pos2(area.right() - SIDE_W, area.top()), area.max);
+        area.max.x = r.left() - 8.0;
+        r
+    });
     let Some(ch) = st.channel.filter(|c| project.channel(*c).is_some()) else {
         ui.painter().text(area.center(), Align2::CENTER_CENTER, tr!("Aucun channel", "No channel"), body(16.0), TEXT_DIMMER);
         return;
@@ -263,6 +281,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let grid = Rect::from_min_max(pos2(kb.right(), roll.top()), roll.max);
     let vel_full = Rect::from_min_max(pos2(area.left(), roll.bottom() + 6.0), area.max);
     let vel = Rect::from_min_max(pos2(vel_full.left() + KB_W, vel_full.top()), vel_full.max);
+    // Lane label: shows the active parameter, a tap cycles through them.
+    let vlabel = Rect::from_min_max(vel_full.min, pos2(vel.left(), vel_full.bottom()));
     if grid.width() < 20.0 || grid.height() < 20.0 {
         return;
     }
@@ -372,7 +392,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             Some(Drag::Keyboard { key, .. } | Drag::Move { key, .. } | Drag::Paint { brush: Note { key, .. }, .. }) => {
                 actions.push(UiAction::Preview { channel: ch, key, vel: 0, on: false })
             }
-            other => ps.drag = other.filter(|d| matches!(d, Drag::Velocity | Drag::Erase)),
+            other => ps.drag = other.filter(|d| matches!(d, Drag::Lane(_) | Drag::Erase)),
         }
     }
     let mut notes = notes_snapshot.clone();
@@ -500,8 +520,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 let key = key_of(pos.y);
                 actions.push(UiAction::Preview { channel: ch, key, vel: 100, on: true });
                 ps.drag = Some(Drag::Keyboard { key, y0: pos.y, sy0: ps.scroll_y, scrolling: false });
+            } else if vlabel.contains(pos) {
+                ps.param = ps.param.next();
             } else if vel.contains(pos) {
-                ps.drag = Some(Drag::Velocity);
+                ps.drag = Some(Drag::Lane(lane_param(ps.param)));
             } else if grid.contains(pos) {
                 let t = tick_of(pos.x);
                 let h = hit(&notes, pos);
@@ -660,16 +682,19 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                     }
                     set_selection(&mut ps.selected, v);
                 }
-                Drag::Velocity => {
+                Drag::Lane(param) => {
                     let v = (((vel.bottom() - 4.0 - pos.y) / (vel.height() - 8.0)) * 127.0).clamp(1.0, 127.0) as u8;
+                    let pan = lane_pan(pos.y, vel.center().y, (vel.height() - 8.0) / 2.0);
+                    let set = |n: &mut Note| match param {
+                        NoteParam::Pan => n.pan = pan,
+                        _ => n.velocity = v,
+                    };
                     if ps.selected.is_empty() {
-                        for n in notes.iter_mut().filter(|n| (x_of(n.start as f64) + 7.0 - pos.x).abs() <= 8.0) {
-                            n.velocity = v;
-                        }
+                        notes.iter_mut().filter(|n| (x_of(n.start as f64) + 7.0 - pos.x).abs() <= 8.0).for_each(set);
                     } else {
                         for &i in &ps.selected {
                             if let Some(n) = notes.get_mut(i) {
-                                n.velocity = v;
+                                set(n);
                             }
                         }
                     }
@@ -838,28 +863,153 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         }
     }
 
-    // Velocity lane
-    let vlabel = Rect::from_min_max(vel_full.min, pos2(vel.left(), vel_full.bottom()));
+    // Lane: velocity, or pan when it is the active parameter.
     p.rect_filled(vel_full, 8.0, INNER);
     p.rect_stroke(vel_full, 8.0, Stroke::new(1.0_f32, EDGE));
     p.rect_stroke(roll, 8.0, Stroke::new(1.0_f32, EDGE));
-    skin::caption(p, vlabel.center(), Align2::CENTER_CENTER, if selected.is_empty() { tr!("VÉLO", "VEL") } else { tr!("VÉLO ·SÉL", "VEL ·SEL") }, TEXT_DIMMER);
+    let param = ps.param;
+    lane_label(p, vlabel, param, !selected.is_empty());
     let vp = ui.painter_at(vel);
     let mut t = snap_floor(t0, STEP);
     while t <= t1 {
         vline(&vp, x_of(t as f64), vel.top(), vel.bottom(), Color32::from_white_alpha(10), 1.0);
         t += STEP;
     }
+    let pan_lane = lane_param(param) == NoteParam::Pan;
+    let mid = vel.center().y;
+    let half = (vel.height() - 8.0) / 2.0;
+    if pan_lane {
+        hline(&vp, mid, vel.left(), vel.right(), Color32::from_white_alpha(40), 1.0);
+    }
     for (i, n) in notes.iter().enumerate() {
         let x = x_of(n.start as f64) + 2.0;
-        let h = (n.velocity as f32 / 127.0) * (vel.height() - 8.0);
-        let r = Rect::from_min_max(pos2(x, vel.bottom() - 4.0 - h), pos2(x + 10.0, vel.bottom() - 4.0));
         let c = if is_sel(i) { Color32::WHITE } else { color };
-        vp.rect_filled(r, egui::Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, c);
-        vp.rect_filled(Rect::from_min_size(r.min, vec2(10.0, 3.0)), 2.0, mix(c, Color32::WHITE, 0.6));
+        if pan_lane {
+            // From the centre line: up = right, down = left.
+            let y = mid - pan_unit(n.pan) * half;
+            vp.rect_filled(Rect::from_two_pos(pos2(x, mid), pos2(x + 10.0, y)), 2.0, c);
+            vp.rect_filled(Rect::from_center_size(pos2(x + 5.0, y), vec2(10.0, 3.0)), 1.5, mix(c, Color32::WHITE, 0.6));
+        } else {
+            let h = (n.velocity as f32 / 127.0) * (vel.height() - 8.0);
+            let r = Rect::from_min_max(pos2(x, vel.bottom() - 4.0 - h), pos2(x + 10.0, vel.bottom() - 4.0));
+            vp.rect_filled(r, egui::Rounding { nw: 3.0, ne: 3.0, sw: 0.0, se: 0.0 }, c);
+            vp.rect_filled(Rect::from_min_size(r.min, vec2(10.0, 3.0)), 2.0, mix(c, Color32::WHITE, 0.6));
+        }
+    }
+
+    if let Some(r) = side {
+        side_panel(ui, r, &mut ps.param, &notes, &selected);
     }
 
     st.actions.extend(actions);
+}
+
+/// Full-screen side panel: picks the active parameter, shows its value for the selected
+/// notes (or their range) and how many are selected. Never changes the selection.
+fn side_panel(ui: &Ui, rect: Rect, param: &mut NoteParam, notes: &[Note], selected: &[usize]) {
+    let p = ui.painter();
+    p.rect_filled(rect, 8.0, INNER);
+    p.rect_stroke(rect, 8.0, Stroke::new(1.0_f32, EDGE));
+    let inner = rect.shrink(10.0);
+    skin::caption(p, pos2(inner.left() + 2.0, inner.top() + 8.0), Align2::LEFT_CENTER, tr!("PARAMÈTRE", "PARAMETER"), TEXT_DIMMER);
+    let mut y = inner.top() + 22.0;
+    for (i, &np) in NoteParam::ALL.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(inner.left(), y), vec2(inner.width(), PARAM_BTN_H));
+        let resp = ui.interact(r, ui.id().with(("note_param", i)), Sense::click());
+        if resp.clicked() {
+            *param = np;
+        }
+        let fg = skin::paint_button(p, r, 8.0, Kind::Tile, *param == np, resp.is_pointer_button_down_on(), resp.hovered(), true);
+        p.text(r.center(), Align2::CENTER_CENTER, param_name(np), bold(17.0), fg);
+        y += PARAM_BTN_H + 8.0;
+    }
+    // Value of the selected notes, updated live.
+    let lcd_r = Rect::from_min_size(pos2(inner.left(), y + 6.0), vec2(inner.width(), 66.0));
+    skin::lcd_bg(p, lcd_r, 9.0);
+    skin::caption(p, pos2(lcd_r.center().x, lcd_r.top() + 13.0), Align2::CENTER_CENTER, param_short(*param), LCD_LABEL);
+    let value = seq_edit::param_range(notes, selected, *param).map(|r| range_text(*param, r)).unwrap_or_else(|| "—".into());
+    let size = if value.chars().count() > 7 { 17.0 } else { 24.0 };
+    skin::lcd_text(p, pos2(lcd_r.center().x, lcd_r.center().y + 8.0), Align2::CENTER_CENTER, &value, lcd(size), LCD_GREEN);
+    let count = match selected.len() {
+        0 => tr!("Aucune note sélectionnée", "No note selected").to_string(),
+        1 => tr!("1 note sélectionnée", "1 note selected").to_string(),
+        n => trf!("{} notes sélectionnées", "{} notes selected", n),
+    };
+    let g = p.layout(count, body(13.5), TEXT_DIM, inner.width());
+    p.galley(pos2(inner.left() + 2.0, lcd_r.bottom() + 10.0), g, TEXT_DIM);
+}
+
+/// Lane label: the active parameter (name and position in the cycle), tappable.
+fn lane_label(p: &egui::Painter, r: Rect, param: NoteParam, selection: bool) {
+    let r = r.shrink(4.0);
+    skin::paint_button(p, r, 6.0, Kind::Dark, false, false, false, true);
+    let c = r.center();
+    skin::caption(p, c - vec2(0.0, 12.0), Align2::CENTER_CENTER, param_short(param), TEXT);
+    let n = NoteParam::ALL.len() as f32;
+    for (i, &np) in NoteParam::ALL.iter().enumerate() {
+        let x = c.x + (i as f32 - (n - 1.0) / 2.0) * 10.0;
+        p.circle_filled(pos2(x, c.y + 4.0), 3.0, if np == param { ORANGE } else { SEG_ON });
+    }
+    if selection {
+        skin::caption(p, c + vec2(0.0, 17.0), Align2::CENTER_CENTER, tr!("SÉL", "SEL"), TEXT_DIMMER);
+    }
+}
+
+/// What the lane shows and edits: pan when it is active, velocity otherwise.
+fn lane_param(param: NoteParam) -> NoteParam {
+    if param == NoteParam::Pan { NoteParam::Pan } else { NoteParam::Velocity }
+}
+
+/// Pan drawn at height `y` in the lane (centre line `mid`, `half` points to each end):
+/// up = right. Within a few points of the centre line, snaps to the centre.
+fn lane_pan(y: f32, mid: f32, half: f32) -> i8 {
+    if (mid - y).abs() <= 3.0 {
+        return 0;
+    }
+    let u = ((mid - y) / half.max(1.0)).clamp(-1.0, 1.0);
+    if u < 0.0 { u * -(PAN_MIN as f32) } else { u * PAN_MAX as f32 }.round() as i8
+}
+
+fn param_name(p: NoteParam) -> &'static str {
+    match p {
+        NoteParam::Velocity => tr!("Vélocité", "Velocity"),
+        NoteParam::Length => tr!("Durée", "Length"),
+        NoteParam::Pan => tr!("Pan", "Pan"),
+    }
+}
+
+fn param_short(p: NoteParam) -> &'static str {
+    match p {
+        NoteParam::Velocity => tr!("VÉLO", "VEL"),
+        NoteParam::Length => tr!("DURÉE", "LEN"),
+        NoteParam::Pan => tr!("PAN", "PAN"),
+    }
+}
+
+/// A value of `p` as shown to the user.
+fn value_text(p: NoteParam, v: i64) -> String {
+    match p {
+        NoteParam::Velocity => v.to_string(),
+        NoteParam::Length => len_text(v.max(0) as Tick),
+        NoteParam::Pan if v < 0 => trf!("G{}", "L{}", -v),
+        NoteParam::Pan if v > 0 => trf!("D{}", "R{}", v),
+        NoteParam::Pan => tr!("C", "C").to_string(),
+    }
+}
+
+/// A value, or a range "min–max" when the notes differ.
+fn range_text(p: NoteParam, (lo, hi): (i64, i64)) -> String {
+    if lo == hi { value_text(p, lo) } else { format!("{}–{}", value_text(p, lo), value_text(p, hi)) }
+}
+
+/// Note length as a fraction of a whole note ("3/16"), in ticks when none fits.
+fn len_text(len: Tick) -> String {
+    let whole = 4 * PPQ as Tick;
+    [1, 2, 4, 8, 16, 32, 64, 3, 6, 12, 24, 48, 96]
+        .into_iter()
+        .find(|&d| (len * d).is_multiple_of(whole))
+        .map(|d| format!("{}/{}", len * d / whole, d))
+        .unwrap_or_else(|| trf!("{} ticks", "{} ticks", len))
 }
 
 /// Playhead position inside `pattern` (length `pat_len`) for the song position `pos`:
@@ -938,6 +1088,46 @@ mod tests {
         // A muted track doesn't play, so the other clip gives the position.
         arr.set_muted(1, true);
         assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 700.0), Some(700.0));
+    }
+}
+
+#[cfg(test)]
+mod param_tests {
+    use super::*;
+
+    #[test]
+    fn lengths_read_as_fractions() {
+        assert_eq!(len_text(STEP), "1/16");
+        assert_eq!(len_text(3 * STEP), "3/16");
+        assert_eq!(len_text(PPQ as Tick), "1/4");
+        assert_eq!(len_text(4 * PPQ as Tick), "1/1");
+        assert_eq!(len_text(6 * PPQ as Tick), "3/2");
+        assert_eq!(len_text(STEP / 4), "1/64");
+        assert_eq!(len_text(PPQ as Tick / 6), "1/24");
+        assert!(len_text(7).contains('7'));
+    }
+
+    #[test]
+    fn values_and_ranges() {
+        seq_i18n::with_lang(seq_i18n::Lang::En, || {
+            assert_eq!(range_text(NoteParam::Velocity, (90, 90)), "90");
+            assert_eq!(range_text(NoteParam::Velocity, (40, 100)), "40–100");
+            assert_eq!(range_text(NoteParam::Pan, (-64, 63)), "L64–R63");
+            assert_eq!(range_text(NoteParam::Pan, (0, 0)), "C");
+            assert_eq!(range_text(NoteParam::Length, (STEP as i64, 2 * STEP as i64)), "1/16–1/8");
+        });
+    }
+
+    #[test]
+    fn lane_pan_from_height() {
+        assert_eq!(lane_pan(50.0, 50.0, 20.0), 0);
+        assert_eq!(lane_pan(51.0, 50.0, 20.0), 0);
+        assert_eq!(lane_pan(30.0, 50.0, 20.0), PAN_MAX);
+        assert_eq!(lane_pan(0.0, 50.0, 20.0), PAN_MAX);
+        assert_eq!(lane_pan(70.0, 50.0, 20.0), PAN_MIN);
+        assert_eq!(lane_pan(60.0, 50.0, 20.0), -32);
+        assert_eq!(lane_param(NoteParam::Length), NoteParam::Velocity);
+        assert_eq!(lane_param(NoteParam::Pan), NoteParam::Pan);
     }
 }
 
