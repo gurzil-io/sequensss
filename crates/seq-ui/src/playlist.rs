@@ -1,5 +1,9 @@
 //! Timeline (playlist): pattern palette, tracks × time, clips, multi-selection,
 //! selection loop, track mute.
+//!
+//! Touch: two fingers scroll and zoom. With one finger, the strip under the lanes scrolls
+//! horizontally and a drag on the mute column scrolls the tracks. The timeline always
+//! reaches one screen past the end of the song, so there is room for new clips.
 
 use crate::skin::{self, Kind};
 use crate::theme::*;
@@ -16,6 +20,13 @@ const EDGE_PX: f32 = 8.0;
 const PALETTE_W: f32 = 230.0;
 /// Column of mute buttons, left of the tracks.
 const LANE_W: f32 = 40.0;
+/// Overview strip under the lanes (one-finger horizontal scroll), and the gap above it.
+const HBAR_H: f32 = 16.0;
+const HBAR_GAP: f32 = 6.0;
+/// Even an empty song spans this many bars.
+const MIN_BARS: Tick = 16;
+/// Vertical drag (points) on the mute column before it scrolls rather than taps.
+const SCROLL_SLOP: f32 = 8.0;
 
 #[derive(Clone, PartialEq)]
 enum Drag {
@@ -28,6 +39,9 @@ enum Drag {
     /// Brush: `brush` = copied clip (cell 0 = `brush.start`, fixed track), `last` = last
     /// painted cell, `before` = clips before the gesture (restored on two fingers).
     Paint { brush: Clip, last: i64, before: Vec<Clip> },
+    /// Press on the mute column: past a few points of vertical drag, scrolls the tracks
+    /// (`y0`, `sy0` = starting position and scroll).
+    ScrollY { y0: f32, sy0: f32, scrolling: bool },
 }
 
 /// Menu opened by a double tap: on a palette pattern, or on a clip (index).
@@ -40,6 +54,8 @@ enum TapMenu {
 pub struct PlaylistState {
     scroll_x: f32,
     scroll_y: f32,
+    /// Horizontal scroll limit of the last frame (kept during a gesture, see [`scroll_limit`]).
+    max_x: f32,
     zoom: f32,
     /// 0 = bar
     snap: Tick,
@@ -63,6 +79,7 @@ impl Default for PlaylistState {
         PlaylistState {
             scroll_x: 0.0,
             scroll_y: 0.0,
+            max_x: 0.0,
             zoom: 0.0,
             snap: 0,
             drag: None,
@@ -149,7 +166,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 
     let area = res.body.shrink(10.0);
     let palette = Rect::from_min_size(area.min, vec2(PALETTE_W, area.height()));
-    let arr = Rect::from_min_max(pos2(palette.right() + 10.0, area.top()), area.max);
+    let arr = Rect::from_min_max(pos2(palette.right() + 10.0, area.top()), pos2(area.right(), area.bottom() - HBAR_H - HBAR_GAP));
+    let strip = Rect::from_min_max(pos2(arr.left() + LANE_W, arr.bottom() + HBAR_GAP), area.max);
 
     // Pattern info (copied: avoids a double borrow of `project`).
     let pat_info: HashMap<PatternId, (String, Tick, Vec<Note>)> = project
@@ -217,6 +235,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let grid = Rect::from_min_max(pos2(lanes.right(), ruler.bottom() + 1.0), arr.max);
     let resp = ui.interact(arr, ui.id().with("timeline_area"), Sense::click_and_drag());
     let pointer = Pointer::read(ui);
+    // Two fingers scroll the panel they are on (the first one), not every panel.
+    let fingers_here = pointer.multi && pointer.pos.is_some_and(|p| arr.contains(p));
     if resp.hovered() && (pointer.primary_pressed || pointer.secondary_pressed) {
         st.active_editor = Editor::Timeline;
     }
@@ -229,7 +249,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     if ps.zoom <= 0.0 {
         ps.zoom = (grid.width() / (16 * bar) as f32).max(0.004);
     }
-    if resp.hovered() || pointer.multi {
+    if resp.hovered() || fingers_here {
         if pointer.zoom != 1.0 {
             let anchor = pointer.pos.map(|p| (p.x - grid.left() + ps.scroll_x) / ps.zoom).unwrap_or(0.0);
             ps.zoom = (ps.zoom * pointer.zoom).clamp(0.004, 0.5);
@@ -245,9 +265,12 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         ps.scroll_x -= dx;
         ps.scroll_y -= dy;
     }
-    let song_end = project.song_length().max(16 * bar);
-    ps.scroll_x = ps.scroll_x.clamp(0.0, (song_end as f32 * ps.zoom - grid.width() * 0.5).max(0.0));
-    ps.scroll_y = ps.scroll_y.clamp(0.0, (tracks as f32 * (track_h + 2.0) - grid.height()).max(0.0));
+    let song_end = project.song_length();
+    let reach = reach(song_end, (grid.width() / ps.zoom) as Tick, bar);
+    ps.max_x = scroll_limit(reach, ps.zoom, grid.width(), ps.drag.is_some().then_some(ps.max_x));
+    ps.scroll_x = ps.scroll_x.clamp(0.0, ps.max_x);
+    let content_h = tracks as f32 * (track_h + 2.0) + 2.0;
+    ps.scroll_y = ps.scroll_y.clamp(0.0, (content_h - grid.height()).max(0.0));
 
     let (zoom, sx, sy, th) = (ps.zoom, ps.scroll_x, ps.scroll_y, track_h);
     let x_of = |t: f64| grid.left() + t as f32 * zoom - sx;
@@ -328,6 +351,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         if pointer.primary_pressed {
             if ruler.contains(pos) {
                 ps.drag = Some(Drag::Loop { anchor: snap_round(tick_of(pos.x), snap), moved: false });
+            } else if lanes.contains(pos) {
+                ps.drag = Some(Drag::ScrollY { y0: pos.y, sy0: ps.scroll_y, scrolling: false });
             } else if grid.contains(pos) {
                 let t = tick_of(pos.x);
                 match hit(clips, pos) {
@@ -464,6 +489,13 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                     if let Some(i) = hit(clips, pos) {
                         clips.remove(i);
                         ps.selected.clear();
+                    }
+                }
+                Drag::ScrollY { y0, sy0, scrolling } => {
+                    let dy = pos.y - y0;
+                    if scrolling || dy.abs() > SCROLL_SLOP {
+                        ps.drag = Some(Drag::ScrollY { y0, sy0, scrolling: true });
+                        ps.scroll_y = (sy0 - dy).clamp(0.0, (content_h - grid.height()).max(0.0));
                     }
                 }
                 Drag::Loop { anchor, moved } => {
@@ -607,7 +639,14 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             vline(&gp, x, grid.top(), grid.bottom(), pal().lcd_green, 2.0);
         }
     }
+    // More tracks than fit: where the view is, at the right edge.
+    if content_h > grid.height() {
+        let k = grid.height() / content_h;
+        let bar_r = Rect::from_min_max(pos2(grid.right() - 6.0, grid.top() + sy * k), pos2(grid.right() - 2.0, grid.top() + (sy + grid.height()) * k));
+        gp.rect_filled(bar_r, 2.0, pal().thumb_edge);
+    }
     p.rect_stroke(arr, 8.0, Stroke::new(1.0_f32, pal().edge));
+    overview(ui, strip, &mut st.playlist, &project.arrangement.clips, tracks, reach, song_end, grid.width());
 
     if let Some(tr) = toggle_mute {
         seq_edit::toggle_track_mute(project, tr);
@@ -702,6 +741,64 @@ fn menu_anchor(anchor: Rect, menu_h: f32, screen: Rect) -> (Rect, egui::AboveOrB
     (anchor, side)
 }
 
+/// How far the timeline reaches (ticks): the end of the song (at least `MIN_BARS` bars) plus
+/// one screen (`view` ticks) of empty room, rounded up to a bar. A clip placed in that room
+/// moves the end of the song, and the reach with it, so the timeline never runs out.
+fn reach(song_end: Tick, view: Tick, bar: Tick) -> Tick {
+    let bar = bar.max(1);
+    (song_end.max(MIN_BARS * bar) + view).div_ceil(bar) * bar
+}
+
+/// Largest horizontal scroll (points): the end of `reach` at the right edge of a `view_w`
+/// wide view. During a gesture the previous limit (`held`) is kept if it was larger, so
+/// dragging a clip back from the far end does not pull the timeline under the finger.
+fn scroll_limit(reach: Tick, zoom: f32, view_w: f32, held: Option<f32>) -> f32 {
+    let max = (reach as f32 * zoom - view_w).max(0.0);
+    held.map_or(max, |h| max.max(h))
+}
+
+/// Overview strip under the lanes: the whole reach with the song and its clips, and the
+/// part in view. Tap = jump there, drag = scroll (one finger, while the lanes edit).
+#[allow(clippy::too_many_arguments)]
+fn overview(ui: &mut Ui, rect: Rect, ps: &mut PlaylistState, clips: &[Clip], tracks: u16, reach: Tick, song_end: Tick, view_w: f32) {
+    if rect.width() < 20.0 || rect.height() < 4.0 {
+        return;
+    }
+    let p = ui.painter();
+    let k = rect.width() / reach.max(1) as f32;
+    let x_of = |t: f32| rect.left() + t * k;
+    p.rect_filled(rect, 5.0, pal().inner);
+    if song_end > 0 {
+        // Display: fainter, so the thumb outline stands out (as in the rack).
+        let a = if screen() { 6 } else { 45 };
+        p.rect_filled(Rect::from_min_max(rect.min, pos2(x_of(song_end as f32).min(rect.right()), rect.bottom())), 5.0, with_alpha(pal().orange, a));
+    }
+    let inner = rect.shrink2(vec2(0.0, 3.0));
+    let row = inner.height() / tracks.max(1) as f32;
+    for c in clips {
+        let y = inner.top() + c.track as f32 * row;
+        let r = Rect::from_min_max(pos2(x_of(c.start as f32), y), pos2(x_of((c.start + c.len) as f32).max(x_of(c.start as f32) + 1.5), y + row.max(1.5)));
+        p.rect_filled(r.intersect(rect), 0.0, with_alpha(id_color(c.pattern.0), 190));
+    }
+    let view = view_w / ps.zoom;
+    let thumb = Rect::from_min_max(pos2(x_of(ps.scroll_x / ps.zoom), rect.top()), pos2(x_of(ps.scroll_x / ps.zoom + view).min(rect.right()), rect.bottom()));
+    p.rect_filled(thumb, 5.0, pal().thumb);
+    p.rect_stroke(thumb, 5.0, Stroke::new(1.0_f32, pal().thumb_edge));
+
+    let resp = ui.interact(rect.expand2(vec2(0.0, 4.0)), ui.id().with("timeline_hscroll"), Sense::click_and_drag());
+    let pressed = ui.input(|i| i.pointer.primary_pressed());
+    if resp.hovered()
+        && pressed
+        && let Some(pos) = resp.interact_pointer_pos().or(resp.hover_pos()).filter(|p| !thumb.x_range().contains(p.x))
+    {
+        ps.scroll_x = ((pos.x - rect.left()) / k - view / 2.0) * ps.zoom;
+    }
+    if resp.dragged() {
+        ps.scroll_x += resp.drag_delta().x / k * ps.zoom;
+    }
+    ps.scroll_x = ps.scroll_x.clamp(0.0, ps.max_x);
+}
+
 fn fmt_bar(t: Tick, bar: Tick) -> String {
     if t.is_multiple_of(bar) { format!("{}", t / bar + 1) } else { format!("{:.2}", t as f64 / bar as f64 + 1.0) }
 }
@@ -723,6 +820,31 @@ mod tests {
         assert!(r.top() - h >= screen.top());
         // A long clip does not stretch the menu.
         assert_eq!(r.width(), 260.0);
+    }
+
+    #[test]
+    fn timeline_reaches_a_screen_past_the_song() {
+        let bar = 3840;
+        // Empty song: 16 bars, plus a screen of 16 bars.
+        assert_eq!(reach(0, 16 * bar, bar), 32 * bar);
+        // Long song: its end plus the screen, rounded up to a bar.
+        assert_eq!(reach(40 * bar + 10, 8 * bar, bar), 49 * bar);
+        // So the view scrolls until the song end meets its left edge: a whole screen free.
+        let zoom = 0.01;
+        let view_w = 8.0 * bar as f32 * zoom;
+        let max = scroll_limit(reach(40 * bar, 8 * bar, bar), zoom, view_w, None);
+        assert!((max - 40.0 * bar as f32 * zoom).abs() < 0.01);
+        // Placing a clip out there pushes the reach further.
+        assert!(reach(47 * bar, 8 * bar, bar) > reach(40 * bar, 8 * bar, bar));
+    }
+
+    #[test]
+    fn scroll_limit_holds_during_a_gesture() {
+        assert_eq!(scroll_limit(1000, 1.0, 400.0, None), 600.0);
+        assert_eq!(scroll_limit(10, 1.0, 400.0, None), 0.0);
+        // The song got shorter under the finger: the limit stays until the gesture ends.
+        assert_eq!(scroll_limit(800, 1.0, 400.0, Some(600.0)), 600.0);
+        assert_eq!(scroll_limit(1200, 1.0, 400.0, Some(600.0)), 800.0);
     }
 }
 

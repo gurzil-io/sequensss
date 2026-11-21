@@ -435,7 +435,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         ps.centered_for = Some(ch);
         ps.scroll_y = (127.0 - default_key as f32) * ps.key_h - grid.height() / 2.0;
     }
-    if (resp.hovered() || pointer.multi) && scroll_ok {
+    // Two fingers scroll the panel they are on (the first one), not every panel.
+    let fingers_here = pointer.multi && pointer.pos.is_some_and(|p| area.contains(p));
+    if (resp.hovered() || fingers_here) && scroll_ok {
         if pointer.zoom != 1.0 {
             let anchor_tick = pointer.pos.map(|p| (p.x - grid.left() + ps.scroll_x) / ps.zoom).unwrap_or(0.0);
             ps.zoom = (ps.zoom * pointer.zoom).clamp(0.01, 2.0);
