@@ -29,7 +29,8 @@ pub struct AbsNote {
 }
 
 /// A channel's notes over the whole song (same rules as the engine: clip repetition and
-/// truncation, swing). With no clips, the `fallback` pattern is played once.
+/// truncation, swing, muted tracks left out). With no clips, the `fallback` pattern is
+/// played once.
 pub fn flatten_channel(p: &Project, channel: ChannelId, fallback: PatternId) -> Vec<AbsNote> {
     let mut out = Vec::new();
     let mut emit = |pat: &Pattern, at: Tick, clip_len: Tick| {
@@ -56,7 +57,7 @@ pub fn flatten_channel(p: &Project, channel: ChannelId, fallback: PatternId) -> 
             emit(pat, 0, pat.length);
         }
     } else {
-        for c in &p.arrangement.clips {
+        for c in p.arrangement.audible_clips() {
             if let Some(pat) = p.pattern(c.pattern) {
                 emit(pat, c.start, c.len);
             }
@@ -285,6 +286,21 @@ mod tests {
     }
 
     #[test]
+    fn wav_export_song_skips_muted_tracks() {
+        let (mut p, pat) = one_kick_project();
+        let bar = p.bar_len();
+        // Bar 1 on a muted track, bar 2 on a playing one: same file as with bar 2 alone.
+        p.arrangement.clips.push(Clip { pattern: pat, track: 0, start: 0, len: bar });
+        p.arrangement.clips.push(Clip { pattern: pat, track: 3, start: bar, len: bar });
+        p.arrangement.set_muted(0, true);
+        let path = tmp_dir("wav-e2e-muted").join("out.wav");
+        let (_, s) = export_and_read(&p, seq_engine::PlayMode::Song, &path);
+        assert_eq!(s.len(), 6 * 48_000 * 2);
+        assert!(rms(&s, 48_000, 0.0, 2.49) < 1e-4, "sound from the muted track");
+        assert!(rms(&s, 48_000, 2.5, 2.6) > 0.05, "no sound on the note");
+    }
+
+    #[test]
     fn wav_16bit_conversion_clips() {
         let path = tmp_dir("wav-clip").join("o.wav");
         write_wav(&path, &[-2.0, 2.0, 1.0, -1.0, 0.5, -0.5, 1e9, -1e9], 44_100).unwrap();
@@ -487,6 +503,25 @@ mod tests {
         p.arrangement.clips.push(Clip { pattern: PatternId(999), track: 0, start: 0, len: p.bar_len() });
         p.arrangement.clips.push(Clip { pattern: pat, track: 1, start: 0, len: 0 });
         assert_eq!(flatten_channel(&p, kick, pat), pattern_only);
+    }
+
+    #[test]
+    fn midi_export_skips_muted_tracks() {
+        let mut p = Project::from_kit(0);
+        let pat = p.patterns[0].id;
+        let kick = p.channels[0].id;
+        let bar = p.bar_len();
+        p.arrangement.clips.push(Clip { pattern: pat, track: 0, start: 0, len: bar });
+        p.arrangement.clips.push(Clip { pattern: pat, track: 1, start: bar, len: bar });
+        assert_eq!(flatten_channel(&p, kick, pat).len(), 8);
+        p.arrangement.set_muted(1, true);
+        let n = flatten_channel(&p, kick, pat);
+        assert_eq!(n.len(), 4);
+        assert!(n.iter().all(|x| x.end <= bar));
+        // Every clip muted: no song, the pattern is exported once.
+        p.arrangement.set_muted(0, true);
+        assert!(!p.has_song());
+        assert_eq!(flatten_channel(&p, kick, pat).len(), 4);
     }
 
     fn notes_of(p: &Project, path: &Path) -> Vec<Vec<(u64, bool, u8)>> {

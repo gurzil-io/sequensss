@@ -158,4 +158,14 @@ mod tests {
         p.arrangement.clips = vec![Clip { pattern: p.patterns[0].id, track: 0, start: 0, len: 0 }];
         assert!(!exports_song(&p));
     }
+
+    #[test]
+    fn export_ignores_clips_on_muted_tracks() {
+        let (mut p, _, _) = project();
+        p.arrangement.clips.push(Clip { pattern: p.patterns[0].id, track: 2, start: 0, len: 3840 });
+        crate::toggle_track_mute(&mut p, 2);
+        assert!(!exports_song(&p));
+        crate::toggle_track_mute(&mut p, 2);
+        assert!(exports_song(&p));
+    }
 }

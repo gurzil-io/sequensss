@@ -21,6 +21,9 @@ fn loads_project_saved_by_earlier_version() {
     // MIDI clock did not exist yet: off on every output.
     assert!(p.midi_clock.is_empty());
     assert_eq!(p.midi_clock_mask(), 0);
+    // Track mute did not exist yet: every track plays.
+    assert!(p.arrangement.muted.is_empty());
+    assert!((0..p.arrangement.tracks).all(|t| !p.arrangement.is_muted(t)));
 
     let lead = p.channels.iter().find(|c| c.name == "Lead").unwrap();
     assert!(lead.arp.enabled);
@@ -33,5 +36,19 @@ fn loads_project_saved_by_earlier_version() {
 #[test]
 fn saves_byte_identical_file() {
     let p: Project = ron::from_str(V1).unwrap();
+    assert_eq!(pretty(&p), V1);
+}
+
+#[test]
+fn muted_tracks_round_trip() {
+    let mut p: Project = ron::from_str(V1).unwrap();
+    p.arrangement.set_muted(2, true);
+    let text = pretty(&p);
+    assert!(text.contains("muted"));
+    let back: Project = ron::from_str(&text).unwrap();
+    assert_eq!(back, p);
+    assert!(back.arrangement.is_muted(2));
+    // Unmuted again: the file is the old one, byte for byte.
+    p.arrangement.set_muted(2, false);
     assert_eq!(pretty(&p), V1);
 }

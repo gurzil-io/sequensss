@@ -1,5 +1,5 @@
 //! Timeline (playlist): pattern palette, tracks × time, clips, multi-selection,
-//! selection loop.
+//! selection loop, track mute.
 
 use crate::skin::{self, Kind};
 use crate::theme::*;
@@ -14,6 +14,8 @@ use std::collections::HashMap;
 const RULER_H: f32 = 28.0;
 const EDGE_PX: f32 = 8.0;
 const PALETTE_W: f32 = 230.0;
+/// Column of mute buttons, left of the tracks.
+const LANE_W: f32 = 40.0;
 
 #[derive(Clone, PartialEq)]
 enum Drag {
@@ -127,13 +129,11 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 st.loop_region = None;
             }
         }
-        if skin::auto_button(ui, 38.0, Kind::Dark, tr!("+ piste", "+ track")).clicked() && project.arrangement.tracks < 64 {
-            project.arrangement.tracks += 1;
+        if skin::auto_button(ui, 38.0, Kind::Dark, tr!("+ piste", "+ track")).clicked() {
+            seq_edit::add_track(project);
         }
-        if skin::auto_button(ui, 38.0, Kind::Dark, tr!("− piste", "− track")).clicked() && project.arrangement.tracks > 1 {
-            let t = project.arrangement.tracks - 1;
-            project.arrangement.clips.retain(|c| c.track < t);
-            project.arrangement.tracks = t;
+        if skin::auto_button(ui, 38.0, Kind::Dark, tr!("− piste", "− track")).clicked() {
+            seq_edit::remove_last_track(project);
         }
         if !st.song_mode {
             ui.label(egui::RichText::new(tr!("Mode PAT : passe en SONG pour écouter", "PAT mode: switch to SONG to listen")).font(medium(13.0)).color(ORANGE_LIGHT));
@@ -211,8 +211,10 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     // --- Arrangement ---
     let p = ui.painter().clone();
     p.rect_filled(arr, 8.0, INNER);
-    let ruler = Rect::from_min_size(arr.min, vec2(arr.width(), RULER_H));
-    let grid = Rect::from_min_max(pos2(arr.left(), ruler.bottom() + 1.0), arr.max);
+    let ruler_bg = Rect::from_min_size(arr.min, vec2(arr.width(), RULER_H));
+    let lanes = Rect::from_min_max(pos2(arr.left(), ruler_bg.bottom() + 1.0), pos2(arr.left() + LANE_W, arr.bottom()));
+    let ruler = Rect::from_min_max(pos2(lanes.right(), arr.top()), ruler_bg.right_bottom());
+    let grid = Rect::from_min_max(pos2(lanes.right(), ruler.bottom() + 1.0), arr.max);
     let resp = ui.interact(arr, ui.id().with("timeline_area"), Sense::click_and_drag());
     let pointer = Pointer::read(ui);
     if resp.hovered() && (pointer.primary_pressed || pointer.secondary_pressed) {
@@ -257,6 +259,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         Rect::from_min_max(pos2(x_of(c.start as f64) + 1.0, y_of(c.track) + 2.0), pos2(x_of((c.start + c.len) as f64) - 1.0, y_of(c.track) + th - 2.0))
     };
 
+    let muted: Vec<bool> = (0..tracks).map(|t| project.arrangement.is_muted(t)).collect();
+    let is_muted = |t: u16| muted.get(t as usize).copied().unwrap_or(false);
     let clips = &mut project.arrangement.clips;
     if ps.seen.as_ref() != Some(&*clips) {
         ps.selected.clear();
@@ -486,10 +490,27 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 
     // --- Drawing ---
     let gp = p.with_clip_rect(grid.intersect(p.clip_rect()));
+    let lp = p.with_clip_rect(lanes.intersect(p.clip_rect()));
+    let mut toggle_mute = None;
     for tr in 0..tracks {
         let y = y_of(tr);
-        gp.rect_filled(Rect::from_min_max(pos2(grid.left(), y), pos2(grid.right(), y + th)), 0.0, if tr % 2 == 1 { INNER_ALT } else { INNER });
+        let bg = if tr % 2 == 1 { INNER_ALT } else { INNER };
+        gp.rect_filled(Rect::from_min_max(pos2(grid.left(), y), pos2(grid.right(), y + th)), 0.0, if is_muted(tr) { mix(bg, Color32::BLACK, 0.3) } else { bg });
+        // Mute button at the start of the lane, like the rack's.
+        let row = Rect::from_min_max(pos2(lanes.left(), y), pos2(lanes.right(), y + th));
+        if !row.intersects(lanes) {
+            continue;
+        }
+        lp.rect_filled(row, 0.0, bg);
+        let r = Rect::from_center_size(row.center(), vec2(LANE_W - 10.0, (th - 6.0).min(32.0)));
+        let b = ui.interact(r.intersect(lanes), ui.id().with(("track_mute", tr)), Sense::click());
+        let fg = skin::paint_button(&lp, r, 6.0, Kind::Tile, is_muted(tr), b.is_pointer_button_down_on(), b.hovered(), true);
+        lp.text(r.center(), Align2::CENTER_CENTER, "M", cond(15.0), fg);
+        if b.on_hover_text(trf!("Couper la piste {}", "Mute track {}", tr + 1)).clicked() {
+            toggle_mute = Some(tr);
+        }
     }
+    vline(&p, lanes.right() - 0.5, lanes.top(), lanes.bottom(), EDGE, 1.0);
     let t0 = tick_of(grid.left());
     let t1 = tick_of(grid.right()) + 1;
     let unit = if (beat as f32 * zoom) >= 10.0 { beat } else { bar };
@@ -508,7 +529,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         if !r.intersects(grid) {
             continue;
         }
-        let color = id_color(c.pattern.0);
+        // Clips on a muted track are dimmed.
+        let color = if is_muted(c.track) { mix(INNER, id_color(c.pattern.0), 0.4) } else { id_color(c.pattern.0) };
         let Some((name, plen, notes)) = pat_info.get(&c.pattern) else { continue };
         let sel = is_sel(i);
         gp.rect_filled(r, 5.0, mix(INNER, color, if sel { 0.32 } else { 0.18 }));
@@ -549,8 +571,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 
     // Ruler
     let rp = p.with_clip_rect(ruler.intersect(p.clip_rect()));
-    rp.rect_filled(ruler, egui::Rounding { nw: 8.0, ne: 8.0, sw: 0.0, se: 0.0 }, RULER);
-    p.line_segment([pos2(ruler.left(), ruler.bottom() + 0.5), pos2(ruler.right(), ruler.bottom() + 0.5)], Stroke::new(1.0_f32, EDGE));
+    p.rect_filled(ruler_bg, egui::Rounding { nw: 8.0, ne: 8.0, sw: 0.0, se: 0.0 }, RULER);
+    p.line_segment([pos2(ruler_bg.left(), ruler.bottom() + 0.5), pos2(ruler.right(), ruler.bottom() + 0.5)], Stroke::new(1.0_f32, EDGE));
     if let Some((a, b)) = st.loop_region {
         let lr = Rect::from_min_max(pos2(x_of(a as f64).max(ruler.left()), ruler.top()), pos2(x_of(b as f64).min(ruler.right()), ruler.bottom()));
         if lr.width() > 0.0 {
@@ -580,6 +602,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     }
     p.rect_stroke(arr, 8.0, Stroke::new(1.0_f32, EDGE));
 
+    if let Some(tr) = toggle_mute {
+        seq_edit::toggle_track_mute(project, tr);
+    }
     let anchor = match st.playlist.menu {
         Some(TapMenu::Pattern(id)) => tiles.iter().find(|(t, _)| *t == id).map(|(_, r)| *r),
         Some(TapMenu::Clip(i)) => project.arrangement.clips.get(i).map(|c| clip_rect(c).intersect(grid)),

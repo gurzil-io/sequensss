@@ -47,7 +47,7 @@ pub struct Project {
     pub midi_outs: Vec<Option<String>>,
     /// Outputs that send MIDI clock and Start / Stop / Continue, parallel to `midi_outs`
     /// (missing = off). Not written while all are off: older versions read the file as is.
-    #[serde(default, skip_serializing_if = "no_clock")]
+    #[serde(default, skip_serializing_if = "all_off")]
     pub midi_clock: Vec<bool>,
 }
 
@@ -55,7 +55,7 @@ fn default_midi_outs() -> Vec<Option<String>> {
     vec![None]
 }
 
-fn no_clock(v: &[bool]) -> bool {
+fn all_off(v: &[bool]) -> bool {
     !v.contains(&true)
 }
 
@@ -283,6 +283,47 @@ pub struct Note {
 pub struct Arrangement {
     pub tracks: u16,
     pub clips: Vec<Clip>,
+    /// Muted tracks, by index (missing = not muted). Not written while none is muted:
+    /// older versions read the file as is.
+    #[serde(default, skip_serializing_if = "all_off")]
+    pub muted: Vec<bool>,
+}
+
+impl Arrangement {
+    pub fn is_muted(&self, track: u16) -> bool {
+        self.muted.get(track as usize).copied().unwrap_or(false)
+    }
+
+    /// Mutes or unmutes a track (ignored past the last track).
+    pub fn set_muted(&mut self, track: u16, on: bool) {
+        if track >= self.tracks {
+            return;
+        }
+        let i = track as usize;
+        if self.muted.len() <= i {
+            self.muted.resize(i + 1, false);
+        }
+        self.muted[i] = on;
+        while self.muted.last() == Some(&false) {
+            self.muted.pop();
+        }
+    }
+
+    /// Changes the number of tracks: the clips and mute states of the removed tracks go.
+    pub fn set_tracks(&mut self, n: u16) {
+        let n = n.max(1);
+        self.clips.retain(|c| c.track < n);
+        self.muted.truncate(n as usize);
+        while self.muted.last() == Some(&false) {
+            self.muted.pop();
+        }
+        self.tracks = n;
+    }
+
+    /// Clips that are heard: those on tracks that are not muted.
+    pub fn audible_clips(&self) -> impl Iterator<Item = &Clip> {
+        self.clips.iter().filter(|c| !self.is_muted(c.track))
+    }
 }
 
 /// A clip plays its pattern from the start; if `len` exceeds the pattern length,
@@ -311,7 +352,7 @@ impl Project {
             swing: 0.0,
             channels: Vec::new(),
             patterns: Vec::new(),
-            arrangement: Arrangement { tracks: 8, clips: Vec::new() },
+            arrangement: Arrangement { tracks: 8, clips: Vec::new(), muted: Vec::new() },
             next_id: 1,
             midi_outs: default_midi_outs(),
             midi_clock: Vec::new(),
@@ -388,10 +429,11 @@ impl Project {
         self.channels.iter_mut().find(|c| c.id == id).map(CowArc::make_mut)
     }
 
-    /// Whether the playlist has a clip that plays something: a non-zero length and an
-    /// existing pattern. Otherwise playback and export fall back to the current pattern.
+    /// Whether the playlist has a clip that plays something: a non-zero length, an
+    /// existing pattern and a track that is not muted. Otherwise playback and export fall
+    /// back to the current pattern.
     pub fn has_song(&self) -> bool {
-        self.arrangement.clips.iter().any(|c| c.len > 0 && self.pattern(c.pattern).is_some())
+        self.arrangement.audible_clips().any(|c| c.len > 0 && self.pattern(c.pattern).is_some())
     }
 
     pub fn pattern(&self, id: PatternId) -> Option<&Pattern> {

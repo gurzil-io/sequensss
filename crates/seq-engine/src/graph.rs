@@ -196,18 +196,19 @@ fn compile_pattern(pat: &Pattern, swing: f32, index: &HashMap<ChannelId, u16>) -
 }
 
 fn assemble(p: &Project, channels: Vec<ChannelParams>, patterns: Vec<CompiledPattern>) -> PlaybackGraph {
-    let mut song: Vec<CompiledClip> = p
-        .arrangement
-        .clips
-        .iter()
-        .filter(|c| c.len > 0)
+    let arr = &p.arrangement;
+    let playable = |c: &&Clip| c.len > 0 && patterns.iter().any(|cp| cp.id == c.pattern);
+    let mut song: Vec<CompiledClip> = arr
+        .audible_clips()
+        .filter(playable)
         .filter_map(|c| {
             let pi = patterns.iter().position(|cp| cp.id == c.pattern)?;
             Some(CompiledClip { pattern: pi as u16, start: c.start, len: c.len })
         })
         .collect();
     song.sort_by_key(|c| c.start);
-    let song_length = song.iter().map(|c| c.start + c.len).max().unwrap_or(0);
+    // Muted tracks are silent but keep their place: the song length does not change.
+    let song_length = arr.clips.iter().filter(playable).map(|c| c.start + c.len).max().unwrap_or(0);
 
     PlaybackGraph {
         tempo_bpm: p.tempo_bpm.clamp(10.0, 999.0),
@@ -318,6 +319,22 @@ mod tests {
         }
         // Most edits touch a single pattern.
         assert!(c.compiled * 3 < full, "{} of {full}", c.compiled);
+    }
+
+    #[test]
+    fn muted_tracks_are_left_out_of_the_song() {
+        let mut p = Project::from_kit(0);
+        let pat = p.patterns[0].id;
+        let bar = p.bar_len();
+        p.arrangement.clips.push(Clip { pattern: pat, track: 0, start: 0, len: bar });
+        p.arrangement.clips.push(Clip { pattern: pat, track: 1, start: bar, len: 2 * bar });
+        assert_eq!(compile(&p).song.len(), 2);
+        p.arrangement.set_muted(1, true);
+        let g = compile(&p);
+        assert_eq!(g.song, vec![CompiledClip { pattern: 0, start: 0, len: bar }]);
+        // The song keeps its length.
+        assert_eq!(g.song_length, 3 * bar);
+        assert_eq!(Compiler::default().compile(&p), g);
     }
 
     #[test]

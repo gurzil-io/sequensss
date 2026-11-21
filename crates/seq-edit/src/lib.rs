@@ -313,6 +313,38 @@ pub fn delete_pattern_clips(project: &mut Project, pattern: PatternId) -> usize 
 }
 
 // ---------------------------------------------------------------------------
+// Timeline tracks
+// ---------------------------------------------------------------------------
+
+/// Maximum number of timeline tracks.
+pub const MAX_TRACKS: u16 = 64;
+
+pub fn add_track(project: &mut Project) -> bool {
+    let n = project.arrangement.tracks;
+    if n >= MAX_TRACKS {
+        return false;
+    }
+    project.arrangement.set_tracks(n + 1);
+    true
+}
+
+/// Removes the last track, its clips and its mute state. Keeps at least one track.
+pub fn remove_last_track(project: &mut Project) -> bool {
+    let n = project.arrangement.tracks;
+    if n <= 1 {
+        return false;
+    }
+    project.arrangement.set_tracks(n - 1);
+    true
+}
+
+pub fn toggle_track_mute(project: &mut Project, track: u16) {
+    let arr = &mut project.arrangement;
+    let on = !arr.is_muted(track);
+    arr.set_muted(track, on);
+}
+
+// ---------------------------------------------------------------------------
 // Pattern length. It grows by whole bars when something is placed past the end,
 // and only shrinks when the bars removed hold no note (nothing is ever cut).
 // ---------------------------------------------------------------------------
@@ -991,6 +1023,49 @@ mod tests {
         assert!(h.commit_if_changed(&p, false));
         assert!(h.undo(&mut p));
         assert_eq!(p.arrangement.clips.len(), 3);
+    }
+
+    #[test]
+    fn track_mute_toggles_and_undoes() {
+        let (mut p, _, _) = setup();
+        let mut h = History::new(&p, 100);
+        toggle_track_mute(&mut p, 2);
+        assert!(p.arrangement.is_muted(2));
+        assert!(!p.arrangement.is_muted(1));
+        assert_eq!(p.arrangement.muted, vec![false, false, true]);
+        assert!(h.commit_if_changed(&p, false));
+        toggle_track_mute(&mut p, 2);
+        // Back to nothing muted: nothing left to save.
+        assert!(p.arrangement.muted.is_empty());
+        h.commit_if_changed(&p, false);
+        assert!(h.undo(&mut p));
+        assert!(p.arrangement.is_muted(2));
+        assert!(h.undo(&mut p));
+        assert!(!p.arrangement.is_muted(2));
+        // Past the last track: ignored.
+        let past = p.arrangement.tracks;
+        toggle_track_mute(&mut p, past);
+        assert!(p.arrangement.muted.is_empty());
+    }
+
+    #[test]
+    fn removing_a_track_drops_its_clips_and_mute() {
+        let (mut p, pat, _) = setup();
+        let last = p.arrangement.tracks - 1;
+        p.arrangement.clips.push(Clip { pattern: pat, track: last, start: 0, len: 100 });
+        p.arrangement.clips.push(Clip { pattern: pat, track: 0, start: 0, len: 100 });
+        toggle_track_mute(&mut p, last);
+        assert!(remove_last_track(&mut p));
+        assert_eq!(p.arrangement.tracks, last);
+        assert_eq!(p.arrangement.clips.len(), 1);
+        assert!(p.arrangement.muted.is_empty());
+        // A track added again starts unmuted.
+        assert!(add_track(&mut p));
+        assert!(!p.arrangement.is_muted(last));
+        while remove_last_track(&mut p) {}
+        assert_eq!(p.arrangement.tracks, 1);
+        while add_track(&mut p) {}
+        assert_eq!(p.arrangement.tracks, MAX_TRACKS);
     }
 
     #[test]
