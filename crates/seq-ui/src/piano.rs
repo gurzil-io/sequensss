@@ -1003,32 +1003,28 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     // Keyboard
     let kp = ui.painter_at(kb);
     kp.rect_filled(kb, 0.0, pal().keyboard_bg);
-    for key in 0..=127u8 {
-        let y = y_of(key);
-        if y > kb.bottom() || y + kh < kb.top() {
-            continue;
-        }
-        let r = Rect::from_min_max(pos2(kb.left(), y), pos2(kb.right(), y + kh));
-        let pressed = pressed_key == Some(key);
-        if screen() {
-            screen_key(&kp, r, key, pressed, key % 12 == 0 || key == default_key);
+    if screen() {
+        screen_keyboard(&kp, kb, kh, &y_of, pressed_key, default_key);
+    } else {
+        for key in 0..=127u8 {
+            let y = y_of(key);
+            if y > kb.bottom() || y + kh < kb.top() {
+                continue;
+            }
+            let r = Rect::from_min_max(pos2(kb.left(), y), pos2(kb.right(), y + kh));
+            let pressed = pressed_key == Some(key);
+            if is_black_key(key) {
+                kp.rect_filled(r, 0.0, if pressed { pal().orange_light } else { pal().key_white });
+                let black = Rect::from_min_max(r.min, pos2(r.left() + r.width() * 0.62, r.bottom()));
+                kp.rect_filled(black, 0.0, if pressed { pal().orange } else { pal().key_black });
+            } else {
+                kp.rect_filled(r, 0.0, if pressed { pal().orange_light } else { pal().key_white });
+            }
+            hline(&kp, r.bottom() - 0.5, r.left(), r.right(), pal().key_line, 1.0);
             if key % 12 == 0 || key == default_key {
                 let label = if key == default_key && key % 12 != 0 { format!("{} ●", key_name(key)) } else { key_name(key) };
-                skin::gtext(&kp, pos2(r.right() - 6.0, r.center().y), Align2::RIGHT_CENTER, label, bold(11.0), pal().key_label);
+                kp.text(pos2(r.right() - 6.0, r.center().y), Align2::RIGHT_CENTER, label, bold(11.0), pal().key_label);
             }
-            continue;
-        }
-        if is_black_key(key) {
-            kp.rect_filled(r, 0.0, if pressed { pal().orange_light } else { pal().key_white });
-            let black = Rect::from_min_max(r.min, pos2(r.left() + r.width() * 0.62, r.bottom()));
-            kp.rect_filled(black, 0.0, if pressed { pal().orange } else { pal().key_black });
-        } else {
-            kp.rect_filled(r, 0.0, if pressed { pal().orange_light } else { pal().key_white });
-        }
-        hline(&kp, r.bottom() - 0.5, r.left(), r.right(), pal().key_line, 1.0);
-        if key % 12 == 0 || key == default_key {
-            let label = if key == default_key && key % 12 != 0 { format!("{} ●", key_name(key)) } else { key_name(key) };
-            kp.text(pos2(r.right() - 6.0, r.center().y), Align2::RIGHT_CENTER, label, bold(11.0), pal().key_label);
         }
     }
 
@@ -1131,19 +1127,36 @@ fn min_zoom(pat_len: Tick, bar: Tick, view_w: f32) -> f32 {
     view_w / (2 * pat_len).max(MIN_VIEW_BARS * bar).max(1) as f32
 }
 
-/// Display theme: a keyboard row drawn as segment-display cells, lit amber for white keys,
-/// faint for black keys (and for the labelled rows, so the label reads on top).
-fn screen_key(p: &egui::Painter, r: Rect, key: u8, pressed: bool, labelled: bool) {
+/// Display theme: a real keyboard drawn as lit outlines. White keys reach halfway into
+/// the neighbouring black rows, as on a piano; black keys sit on top, dark and shorter.
+fn screen_keyboard(p: &egui::Painter, kb: Rect, kh: f32, y_of: &dyn Fn(u8) -> f32, pressed_key: Option<u8>, default_key: u8) {
     let amber = pal().orange;
-    let (cells, gap) = (4, 3.0);
-    let inner = r.shrink2(vec2(5.0, 2.0));
-    let w = (inner.width() - gap * (cells - 1) as f32) / cells as f32;
-    let black = is_black_key(key);
-    for c in 0..cells {
-        let cell = Rect::from_min_size(pos2(inner.left() + c as f32 * (w + gap), inner.top()), vec2(w, inner.height()));
-        let lit = pressed || (!black && !labelled) || (black && c == cells - 1);
-        let col = if pressed { pal().yellow } else if lit { with_alpha(amber, 210) } else { with_alpha(amber, 34) };
-        p.rect_filled(cell, 1.5, col);
+    let visible = |top: f32, bottom: f32| bottom >= kb.top() && top <= kb.bottom();
+    for key in (0..=127u8).filter(|&k| !is_black_key(k)) {
+        let up = if key < 127 && is_black_key(key + 1) { kh / 2.0 } else { 0.0 };
+        let down = if key > 0 && is_black_key(key - 1) { kh / 2.0 } else { 0.0 };
+        let (top, bottom) = (y_of(key) - up, y_of(key) + kh + down);
+        if !visible(top, bottom) {
+            continue;
+        }
+        let r = Rect::from_min_max(pos2(kb.left() + 2.0, top + 1.0), pos2(kb.right() - 3.0, bottom - 1.0));
+        let pressed = pressed_key == Some(key);
+        p.rect_filled(r, 3.0, if pressed { with_alpha(pal().yellow, 150) } else { with_alpha(amber, 22) });
+        p.rect_stroke(r, 3.0, Stroke::new(1.2_f32, if pressed { pal().yellow } else { with_alpha(amber, 200) }));
+        if key % 12 == 0 || key == default_key {
+            let label = if key == default_key && key % 12 != 0 { format!("{} ●", key_name(key)) } else { key_name(key) };
+            skin::gtext(p, pos2(r.right() - 6.0, y_of(key) + kh / 2.0), Align2::RIGHT_CENTER, label, bold(11.0), pal().key_label);
+        }
+    }
+    for key in (0..=127u8).filter(|&k| is_black_key(k)) {
+        let y = y_of(key);
+        if !visible(y, y + kh) {
+            continue;
+        }
+        let r = Rect::from_min_max(pos2(kb.left() + 2.0, y + 1.0), pos2(kb.left() + kb.width() * 0.6, y + kh - 1.0));
+        let pressed = pressed_key == Some(key);
+        p.rect_filled(r, 2.5, if pressed { pal().yellow } else { pal().keyboard_bg });
+        p.rect_stroke(r, 2.5, Stroke::new(1.2_f32, if pressed { pal().yellow } else { amber }));
     }
 }
 
