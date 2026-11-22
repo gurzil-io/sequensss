@@ -20,7 +20,7 @@ use seq_io::midi::{self, MidiInConn, MidiInTx, MidiOutThread};
 use seq_io::{export, project_file, samples};
 use seq_i18n::{tr, trf};
 use seq_model::*;
-use seq_ui::{PlaybackInfo, SeqUi, UiAction};
+use seq_ui::{PlaybackInfo, SeqUi, Splash, UiAction};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
@@ -42,6 +42,8 @@ struct App {
     project: Project,
     history: History,
     ui: SeqUi,
+    /// Launch splash, dropped once it has faded out.
+    splash: Option<Splash>,
     file: Option<PathBuf>,
     saved: Project,
 
@@ -109,6 +111,7 @@ impl App {
             saved: project.clone(),
             project,
             ui,
+            splash: Some(Splash::new(update::CURRENT)),
             file,
             audio: None,
             handle: None,
@@ -815,6 +818,12 @@ impl eframe::App for App {
         self.ui.can_redo = self.history.can_redo();
         self.ui.dirty = self.is_dirty();
 
+        // Before the UI: the tap or key that skips the splash must not reach it.
+        if let Some(splash) = &mut self.splash
+            && !splash.show(ctx)
+        {
+            self.splash = None;
+        }
         let actions = self.ui.show(ctx, &mut self.project, &info);
         for a in actions {
             self.handle_action(ctx, a);

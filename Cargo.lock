@@ -3273,6 +3273,7 @@ name = "seq-ui"
 version = "0.1.4"
 dependencies = [
  "eframe",
+ "image",
  "seq-edit",
  "seq-i18n",
  "seq-model",

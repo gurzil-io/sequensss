@@ -27,6 +27,8 @@ mod props;
 mod rack;
 pub mod skin;
 mod sound;
+mod splash;
+mod splash_geom;
 pub mod theme;
 mod widgets;
 
@@ -36,6 +38,7 @@ pub use edit_dialog::EditTarget;
 pub use notice::UpdateNotice;
 pub use piano::PianoState;
 pub use playlist::PlaylistState;
+pub use splash::Splash;
 use skin::Kind;
 use theme::*;
 
@@ -480,7 +483,8 @@ impl SeqUi {
         self.update_notice(ctx);
         self.toast(ctx);
         if theme::screen() {
-            screen_overlay(ctx);
+            let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("screen_overlay"));
+            scanlines(&ctx.layer_painter(layer), ctx.screen_rect());
         }
 
         let pointer_down = ctx.input(|i| i.pointer.primary_down() || i.pointer.secondary_down());
@@ -1030,9 +1034,7 @@ fn drum_grid(ui: &mut egui::Ui, current: Option<Drum>) -> Option<Drum> {
 }
 
 /// Display theme: faint scanlines and a darker rim, painted over everything (input passes through).
-fn screen_overlay(ctx: &egui::Context) {
-    let rect = ctx.screen_rect();
-    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("screen_overlay")));
+fn scanlines(p: &egui::Painter, rect: Rect) {
     let line = Stroke::new(1.0_f32, Color32::from_black_alpha(26));
     let mut y = rect.top() + 1.5;
     while y < rect.bottom() {

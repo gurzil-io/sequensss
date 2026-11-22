@@ -9,3 +9,5 @@ seq-i18n.workspace = true
 seq-model.workspace = true
 seq-edit.workspace = true
 eframe.workspace = true
+# Splash image (already used by eframe, PNG only).
+image = { version = "0.25", default-features = false, features = ["png"] }
