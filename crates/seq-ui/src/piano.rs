@@ -9,11 +9,15 @@
 //!
 //! Touch: two fingers scroll and zoom. One finger holding a note still while another one
 //! slides up or down changes the active parameter of that note, or of all the selected
-//! notes when it is one of them (the same amount added to each).
+//! notes when it is one of them (the same amount added to each). With one finger, the strip
+//! under the lane scrolls horizontally.
+//!
+//! The view always reaches one screen past the end of the pattern: a note placed, moved,
+//! resized or pasted out there grows the pattern to the end of its bar (same undo step).
 
 use crate::skin::{self, Kind};
 use crate::theme::*;
-use crate::widgets::{Pointer, hline, vline};
+use crate::widgets::{self, Pointer, hline, vline};
 use crate::{EditCmd, Editor, PanelId, PlaybackInfo, SeqUi, UiAction};
 use crate::icons::Icon;
 use eframe::egui::{self, Align2, Color32, Event, Pos2, Rect, Sense, Stroke, TouchId, TouchPhase, Ui, pos2, vec2};
@@ -23,6 +27,11 @@ use seq_model::*;
 
 const KB_W: f32 = 72.0;
 const VEL_H: f32 = 56.0;
+/// Overview strip under the lane (one-finger horizontal scroll), and the gap above it.
+const HBAR_H: f32 = 16.0;
+const HBAR_GAP: f32 = 6.0;
+/// Zoomed all the way out, the view spans twice the pattern, and at least this many bars.
+const MIN_VIEW_BARS: Tick = 8;
 /// Side panel (full screen): width, height of the parameter buttons; the panel only
 /// appears when the piano roll is at least `SIDE_MIN_W` wide.
 const SIDE_W: f32 = 176.0;
@@ -80,6 +89,9 @@ const FOLLOW_PAUSE: f64 = 2.0;
 pub struct PianoState {
     scroll_x: f32,
     scroll_y: f32,
+    /// Horizontal scroll limit of the last frame (kept during a gesture, see
+    /// [`widgets::scroll_limit`]).
+    max_x: f32,
     /// pixels per tick
     zoom: f32,
     key_h: f32,
@@ -211,6 +223,7 @@ impl Default for PianoState {
         PianoState {
             scroll_x: 0.0,
             scroll_y: 0.0,
+            max_x: 0.0,
             zoom: 0.16,
             key_h: 22.0,
             snap: STEP,
@@ -373,6 +386,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let color = id_color(ch.0);
     let (note_top, note_bot, note_edge) = note_colors(color);
 
+    let strip = Rect::from_min_max(pos2(area.left() + KB_W, area.bottom() - HBAR_H), area.max);
+    let full = area;
+    area.max.y = strip.top() - HBAR_GAP;
     let roll = Rect::from_min_max(area.min, pos2(area.right(), area.bottom() - VEL_H - 6.0));
     let kb = Rect::from_min_max(roll.min, pos2(roll.left() + KB_W, roll.bottom()));
     let grid = Rect::from_min_max(pos2(kb.right(), roll.top()), roll.max);
@@ -394,8 +410,6 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         Some((p, len)) if p == pat_id => len,
         _ => pat_len,
     };
-    // Room after the end of the pattern: one bar, where notes can be placed (the pattern grows).
-    let reach = (base_len + bar).max(pat_len);
 
     // --- Individual touches (parameter gesture) ---
     let (touch_events, any_touches) = ui.input(|i| {
@@ -436,7 +450,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         ps.scroll_y = (127.0 - default_key as f32) * ps.key_h - grid.height() / 2.0;
     }
     // Two fingers scroll the panel they are on (the first one), not every panel.
-    let fingers_here = pointer.multi && pointer.pos.is_some_and(|p| area.contains(p));
+    let fingers_here = pointer.multi && pointer.pos.is_some_and(|p| full.contains(p));
     if (resp.hovered() || fingers_here) && scroll_ok {
         if pointer.zoom != 1.0 {
             let anchor_tick = pointer.pos.map(|p| (p.x - grid.left() + ps.scroll_x) / ps.zoom).unwrap_or(0.0);
@@ -456,9 +470,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             ps.scrolled_at = pointer.time;
         }
     }
-    // Limited zoom-out: the pattern and the bar after it (at least 4 bars) fill the width.
-    let fit = grid.width() / reach.max(4 * bar) as f32;
-    ps.zoom = ps.zoom.max(fit);
+    // Zoom-out: down to twice the pattern in view (at the length the gesture began with, so
+    // the zoom does not jump while a note is dragged back).
+    ps.zoom = ps.zoom.max(min_zoom(base_len, bar, grid.width()));
     ps.scroll_y = ps.scroll_y.clamp(0.0, (128.0 * ps.key_h - grid.height()).max(0.0));
     // Playhead inside the edited pattern (Song mode: only while one of its clips plays).
     let playhead = info.playing.then(|| if st.song_mode { pattern_playhead(&project.arrangement, pat_id, pat_len, info.playhead) } else { Some(info.playhead) }).flatten();
@@ -473,8 +487,12 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             ps.scroll_x = snap_floor(ph as Tick, bar) as f32 * ps.zoom;
         }
     }
-    ps.scroll_x = ps.scroll_x.clamp(0.0, (reach as f32 * ps.zoom - grid.width()).max(0.0));
-    // Notes can be placed anywhere in sight, and at least one bar past the end.
+    // One screen of room past the end; the limit holds during a gesture.
+    let reach = widgets::reach(pat_len, (grid.width() / ps.zoom) as Tick, bar);
+    let gesture = ps.drag.is_some() || matches!(ps.multi, Multi::Param { .. });
+    ps.max_x = widgets::scroll_limit(reach, ps.zoom, grid.width(), gesture.then_some(ps.max_x));
+    ps.scroll_x = ps.scroll_x.clamp(0.0, ps.max_x);
+    // Notes can be placed anywhere in sight.
     let limit = reach.max((((ps.scroll_x + grid.width()) / ps.zoom) as Tick).div_ceil(bar) * bar);
     // Paste / duplicate: as far as needed.
     let far = limit.max(1024 * bar);
@@ -878,15 +896,8 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     // Notes past the end grow the pattern to the end of their bar (same undo step).
     let new_len = seq_edit::length_for_notes(base_len, &notes, bar);
     let regrow = ps.grow_base.is_some() && new_len != pat_len;
-    if (notes != notes_snapshot || regrow)
-        && let Some(p) = project.pattern_mut(pat_id)
-    {
-        if notes.is_empty() {
-            p.notes.remove(&ch);
-        } else {
-            p.notes.insert(ch, notes.clone());
-        }
-        p.length = new_len;
+    if notes != notes_snapshot || regrow {
+        seq_edit::set_notes_growing(project, pat_id, ch, &notes, base_len);
     }
     let pat_len = new_len;
     ps.grow_base = (ps.drag.is_some() || matches!(ps.multi, Multi::Param { .. })).then_some((pat_id, base_len));
@@ -1090,11 +1101,34 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         fp.galley(r.center() - g.size() / 2.0, g, pal().text);
     }
 
+    // Overview strip: the pattern, its notes and the part in view.
+    let (lo, hi) = seq_edit::preview_keys(&notes, 12);
+    let rows = strip.shrink2(vec2(0.0, 3.0));
+    let marks = |p: &egui::Painter, x_of: &dyn Fn(f32) -> f32| {
+        let row = rows.height() / (hi - lo + 1) as f32;
+        for n in &notes {
+            let y = rows.top() + (hi - n.key) as f32 * row;
+            let x0 = x_of(n.start as f32);
+            let r = Rect::from_min_max(pos2(x0, y), pos2(x_of((n.start + n.len) as f32).max(x0 + 1.5), y + row.max(2.0)));
+            p.rect_filled(r.intersect(strip), 0.0, with_alpha(color, 190));
+        }
+    };
+    if widgets::overview_strip(ui, strip, "piano_hscroll", reach, pat_len, &mut ps.scroll_x, zoom, grid.width(), ps.max_x, marks) {
+        ps.scrolled_at = pointer.time;
+    }
+
     if let Some(r) = side {
         side_panel(ui, r, &mut ps.param, &notes, &selected);
     }
 
     st.actions.extend(actions);
+}
+
+/// Smallest zoom (points per tick) for a `view_w` wide grid: zoomed all the way out, the
+/// view spans twice the pattern (at least `MIN_VIEW_BARS` bars), so several bars past the
+/// end are in sight.
+fn min_zoom(pat_len: Tick, bar: Tick, view_w: f32) -> f32 {
+    view_w / (2 * pat_len).max(MIN_VIEW_BARS * bar).max(1) as f32
 }
 
 /// Display theme: a keyboard row drawn as segment-display cells, lit amber for white keys,
@@ -1243,6 +1277,21 @@ pub(crate) fn pattern_playhead(arr: &Arrangement, pattern: PatternId, pat_len: T
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_out_shows_room_past_the_end() {
+        let bar = 3840;
+        // One-bar pattern: 8 bars in view, zoomed all the way out.
+        assert_eq!(min_zoom(bar, bar, 800.0), 800.0 / (8 * bar) as f32);
+        // Long pattern: twice its length.
+        assert_eq!(min_zoom(16 * bar, bar, 800.0), 800.0 / (32 * bar) as f32);
+        // At that zoom the view reaches as far again past the end, and scrolls there.
+        let zoom = min_zoom(16 * bar, bar, 800.0);
+        let reach = widgets::reach(16 * bar, (800.0 / zoom) as Tick, bar);
+        assert_eq!(reach, 48 * bar);
+        let max = widgets::scroll_limit(reach, zoom, 800.0, None);
+        assert!((max - 16.0 * bar as f32 * zoom).abs() < 0.01);
+    }
 
     fn clip(pattern: u32, track: u16, start: Tick, len: Tick) -> Clip {
         Clip { pattern: PatternId(pattern), track, start, len }

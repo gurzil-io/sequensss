@@ -431,6 +431,23 @@ pub fn replace_channel_notes(project: &mut Project, pattern: PatternId, channel:
     }
 }
 
+/// Piano roll: puts `notes` as the channel's notes in the pattern and sets the length they
+/// need from `base_len` (the length when the gesture began, see [`length_for_notes`]): a
+/// note placed or dragged past the end grows the pattern to the end of its bar, dragging it
+/// back during the same gesture shrinks it again. Returns the new length.
+pub fn set_notes_growing(project: &mut Project, pattern: PatternId, channel: ChannelId, notes: &[Note], base_len: Tick) -> Tick {
+    let bar = project.bar_len();
+    let len = length_for_notes(base_len, notes, bar);
+    let Some(p) = project.pattern_mut(pattern) else { return len };
+    if notes.is_empty() {
+        p.notes.remove(&channel);
+    } else {
+        p.notes.insert(channel, notes.to_vec());
+    }
+    p.length = len;
+    len
+}
+
 // ---------------------------------------------------------------------------
 // Note selection (piano roll). `sel` = indices into `notes`.
 // ---------------------------------------------------------------------------
@@ -1126,6 +1143,31 @@ mod tests {
         set_step(&mut p, pat, ch, 33, false);
         set_step(&mut p, pat, ch, 80, false);
         assert_eq!(p.pattern(pat).unwrap().length, 3 * bar);
+    }
+
+    #[test]
+    fn note_far_past_the_end_grows_in_one_undo_step() {
+        let (mut p, pat, ch) = setup();
+        let bar = p.bar_len();
+        let mut h = History::new(&p, 50);
+        // A note placed in bar 10, then dragged to bar 12 and back to bar 7, in one gesture.
+        let base = p.pattern(pat).unwrap().length;
+        for start in [9 * bar + STEP, 11 * bar, 6 * bar + 2 * STEP] {
+            let len = set_notes_growing(&mut p, pat, ch, &[n(start, STEP, 60)], base);
+            assert_eq!(len, (start / bar + 1) * bar);
+            assert!(!h.commit_if_changed(&p, true));
+        }
+        assert!(h.commit_if_changed(&p, false));
+        assert_eq!(p.pattern(pat).unwrap().length, 7 * bar);
+        // One undo: the note and the growth go together.
+        assert!(h.undo(&mut p));
+        let pt = p.pattern(pat).unwrap();
+        assert_eq!(pt.length, bar);
+        assert!(pt.notes.get(&ch).is_none());
+        // A note ending exactly on a bar line does not add the next bar.
+        assert_eq!(set_notes_growing(&mut p, pat, ch, &[n(3 * bar, bar, 60)], bar), 4 * bar);
+        // Never below the length the gesture started from.
+        assert_eq!(set_notes_growing(&mut p, pat, ch, &[], 4 * bar), 4 * bar);
     }
 
     #[test]
