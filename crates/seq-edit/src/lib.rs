@@ -13,7 +13,7 @@ mod param;
 mod record;
 mod sync;
 pub use param::{NoteParam, adjust_param, min_note_len, param_range};
-pub use record::{RecordedNote, Recorder, add_recorded_note, add_song_recorded_note, grow_to_position, song_record_target};
+pub use record::{PatternTake, RecordedNote, Recorder, add_song_recorded_note, song_record_target};
 pub use sync::{SlotUpdate, exports_song, slot_updates};
 
 /// Default memory budget of the undo history (estimated).

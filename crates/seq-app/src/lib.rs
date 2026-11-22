@@ -11,7 +11,7 @@ pub use files::Files;
 
 use eframe::egui;
 use rtrb::RingBuffer;
-use seq_edit::{History, Recorder, SlotUpdate};
+use seq_edit::{History, PatternTake, Recorder, SlotUpdate};
 use seq_engine::{Compiler, Engine, EngineCmd, EngineEvent, EngineHandle, MidiInMsg, MidiOutMsg, PlayMode, compile, offline};
 use seq_io::audio::{self, AudioOut};
 use seq_io::instruments::{build_slot, sampler_slot};
@@ -40,6 +40,14 @@ enum Hiss {
     Waiting,
     Playing,
     Over,
+}
+
+/// Recording take in progress (see `App::recording_take`).
+struct Take {
+    /// Pattern mode: the pattern recorded into (`None` in Song mode).
+    pattern: Option<PatternTake>,
+    /// Song mode: a note fell outside every clip (said once per take).
+    dropped: bool,
 }
 
 enum Pending {
@@ -91,8 +99,7 @@ struct App {
     levels: HashMap<ChannelId, (f32, f32)>,
     master: (f32, f32),
     recorder: Recorder,
-    /// Song mode: a note of the current take fell outside every clip (said once per take).
-    take_dropped: bool,
+    take: Option<Take>,
     confirm: Option<Pending>,
     title: String,
     files: Files,
@@ -152,7 +159,7 @@ impl App {
             levels: HashMap::new(),
             master: (0.0, 0.0),
             recorder: Recorder::default(),
-            take_dropped: false,
+            take: None,
             confirm: None,
             title: String::new(),
             files,
@@ -461,10 +468,12 @@ impl App {
         }
         let Some(rec) = self.recorder.event(channel, key, vel, tick, time, on) else { return };
         let grid = self.ui.record_grid();
-        if !self.ui.song_mode {
-            seq_edit::add_recorded_note(&mut self.project, self.ui.pattern, rec.channel, rec.to_note(grid));
-        } else if !seq_edit::add_song_recorded_note(&mut self.project, self.ui.pattern, &rec, grid) && !self.take_dropped {
-            self.take_dropped = true;
+        self.sync_take(true);
+        let Some(take) = self.take.as_mut() else { return };
+        if let Some(pt) = take.pattern.as_mut() {
+            pt.add_note(&mut self.project, rec.channel, rec.to_note(grid));
+        } else if !seq_edit::add_song_recorded_note(&mut self.project, self.ui.pattern, &rec, grid) && !take.dropped {
+            take.dropped = true;
             self.ui.status = tr!(
                 "Enregistrement : aucun clip sous la tête de lecture, notes ignorées",
                 "Recording: no clip under the playhead, notes dropped"
@@ -477,6 +486,21 @@ impl App {
     /// loop (the pattern grows).
     fn recording_take(&self, playing: bool) -> bool {
         playing && self.ui.recording
+    }
+
+    /// Starts or ends the take (`active`: see `recording_take`). A switch of pattern or mode
+    /// ends it and starts another one. At the end of a Pattern mode take, the bars added past
+    /// the last recorded note go.
+    fn sync_take(&mut self, active: bool) {
+        let want = (!self.ui.song_mode).then_some(self.ui.pattern);
+        if self.take.as_ref().is_some_and(|t| !active || t.pattern.map(|p| p.pattern) != want)
+            && let Some(pt) = self.take.take().and_then(|t| t.pattern)
+        {
+            pt.finish(&mut self.project);
+        }
+        if active && self.take.is_none() {
+            self.take = Some(Take { pattern: want.map(|p| PatternTake::start(&self.project, p)), dropped: false });
+        }
     }
 
     // ------------------------------------------------------------------
@@ -552,6 +576,8 @@ impl App {
         self.file = file;
         self.ui.reset_for(&self.project);
         self.recorder.clear();
+        // The take was on the previous project.
+        self.take = None;
         self.levels.clear();
         self.update_file_label();
     }
@@ -857,10 +883,15 @@ impl eframe::App for App {
         };
         // The count-in shows as playing (Play pauses, i.e. cancels it).
         let running = playing || count_in > 0;
+        // Before the commit below: the trim at the end of a take is part of its undo step.
+        self.sync_take(self.recording_take(running));
         // Recording past the end of the pattern: it grows bar by bar as the playhead goes
-        // (up to the bar holding the stop position).
-        if self.recording_take(playing) && pattern == Some(self.ui.pattern) {
-            seq_edit::grow_to_position(&mut self.project, self.ui.pattern, playhead);
+        // (trimmed to the last recorded note at the end of the take).
+        if let Some(pt) = self.take.as_ref().and_then(|t| t.pattern)
+            && playing
+            && pattern == Some(pt.pattern)
+        {
+            pt.grow_to_position(&mut self.project, playhead);
         }
         let info = PlaybackInfo { playing: running, playhead, count_in, levels: self.levels.clone(), master: self.master };
         self.ui.loading = self.loader.loading().collect();
@@ -889,9 +920,6 @@ impl eframe::App for App {
             || ctx.wants_keyboard_input()
             || self.recording_take(running);
         self.history.commit_if_changed(&self.project, gesture);
-        if !self.recording_take(running) {
-            self.take_dropped = false;
-        }
         self.sync_engine();
         self.poll_samples();
 

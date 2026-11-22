@@ -1,7 +1,8 @@
 //! Live recording: MIDI in note-on/off events → pattern notes.
 //!
 //! Pattern mode: while recording, the engine does not loop the pattern: notes played past
-//! its end land there and the pattern grows by whole bars (like FL Studio).
+//! its end land there and the pattern grows by whole bars (like FL Studio). At the end of
+//! the take it keeps only the bars up to the last recorded note (see [`PatternTake`]).
 //!
 //! Song mode: notes go into the pattern of the clip under the playhead (see
 //! [`song_record_target`]), wrapped into it as the clip plays it; patterns do not grow.
@@ -67,8 +68,49 @@ impl RecordedNote {
     }
 }
 
+/// Recording take in Pattern mode. While it lasts the pattern grows bar by bar with the
+/// playhead and the notes played past its end, so the rack and the piano roll show where
+/// the recording is; when it ends, the pattern ends with the bar holding the end of the
+/// last recorded note, and never gets shorter than it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternTake {
+    pub pattern: PatternId,
+    /// Length of the pattern when the take started.
+    original: Tick,
+    /// End of the recorded note that ends last (0 = none yet).
+    end: Tick,
+}
+
+impl PatternTake {
+    pub fn start(project: &Project, pattern: PatternId) -> Self {
+        let original = project.pattern(pattern).map_or(0, |p| p.length);
+        Self { pattern, original, end: 0 }
+    }
+
+    /// Adds a recorded note (the pattern grows by whole bars to hold it).
+    pub fn add_note(&mut self, project: &mut Project, channel: ChannelId, note: Note) {
+        self.end = self.end.max(note.start + note.len);
+        add_recorded_note(project, self.pattern, channel, note);
+    }
+
+    /// Recording went on up to position `pos`: see [`grow_to_position`].
+    pub fn grow_to_position(&self, project: &mut Project, pos: f64) -> bool {
+        grow_to_position(project, self.pattern, pos)
+    }
+
+    /// End of the take: the bars added past the last recorded note go. The pattern ends at
+    /// the end of the bar holding the end of that note, or keeps its original length if
+    /// that is longer.
+    pub fn finish(self, project: &mut Project) {
+        let bar = project.bar_len();
+        if let Some(p) = project.pattern_mut(self.pattern) {
+            p.length = crate::length_for_end(self.original, self.end, bar);
+        }
+    }
+}
+
 /// Adds a recorded note to the pattern, which grows by whole bars to hold it.
-pub fn add_recorded_note(project: &mut Project, pattern: PatternId, channel: ChannelId, note: Note) {
+fn add_recorded_note(project: &mut Project, pattern: PatternId, channel: ChannelId, note: Note) {
     let bar = project.bar_len();
     let Some(pat) = project.pattern_mut(pattern) else { return };
     pat.length = crate::length_for_end(pat.length, note.start + note.len, bar);
@@ -113,7 +155,7 @@ pub fn add_song_recorded_note(project: &mut Project, selected: PatternId, rec: &
 
 /// Recording went on past the end of the pattern, up to position `pos` (ticks): the
 /// pattern grows to the end of the bar holding it. Returns `true` if it grew.
-pub fn grow_to_position(project: &mut Project, pattern: PatternId, pos: f64) -> bool {
+fn grow_to_position(project: &mut Project, pattern: PatternId, pos: f64) -> bool {
     let bar = project.bar_len();
     let Some(len) = project.pattern(pattern).map(|p| p.length) else { return false };
     // Also false for NaN.
@@ -334,19 +376,95 @@ mod tests {
 
     #[test]
     fn take_is_one_undo_step() {
-        // The app holds the commit during the take: the notes and the growth undo together.
+        // The app holds the commit during the take: the notes and the length undo together.
         let (mut p, pat, ch) = four_bars();
         let mut h = crate::History::new(&p, 100);
-        add_recorded_note(&mut p, pat, ch, note(BAR, STEP));
+        let mut take = PatternTake::start(&p, pat);
+        take.add_note(&mut p, ch, note(BAR, STEP));
         assert!(!h.commit_if_changed(&p, true));
-        add_recorded_note(&mut p, pat, ch, note(4 * BAR + 100, STEP));
-        grow_to_position(&mut p, pat, (5 * BAR + 10) as f64);
+        take.add_note(&mut p, ch, note(4 * BAR + 100, STEP));
+        take.grow_to_position(&mut p, (5 * BAR + 10) as f64);
+        take.finish(&mut p);
         assert!(h.commit_if_changed(&p, false));
-        assert_eq!(p.pattern(pat).unwrap().length, 6 * BAR);
+        assert_eq!(p.pattern(pat).unwrap().length, 5 * BAR);
         assert!(h.undo(&mut p));
         let pt = p.pattern(pat).unwrap();
         assert_eq!(pt.length, 4 * BAR);
         assert!(pt.notes.get(&ch).is_none_or(|n| n.is_empty()));
+    }
+
+    #[test]
+    fn take_end_trims_to_the_last_recorded_note() {
+        let (mut p, pat, ch) = four_bars();
+        let mut take = PatternTake::start(&p, pat);
+        // A note in bar 6, then one in bar 5: the one that ends last counts.
+        take.add_note(&mut p, ch, note(5 * BAR + 480, STEP));
+        take.add_note(&mut p, ch, note(4 * BAR, STEP));
+        // Stopped in bar 9: the pattern grew up to there while recording.
+        take.grow_to_position(&mut p, (8 * BAR + 100) as f64);
+        assert_eq!(p.pattern(pat).unwrap().length, 9 * BAR);
+        take.finish(&mut p);
+        let pt = p.pattern(pat).unwrap();
+        assert_eq!(pt.length, 6 * BAR);
+        assert_eq!(pt.notes[&ch].len(), 2);
+    }
+
+    #[test]
+    fn take_end_counts_where_the_note_ends() {
+        let (mut p, pat, ch) = four_bars();
+        let mut take = PatternTake::start(&p, pat);
+        // Starts in bar 4, held into bar 6.
+        take.add_note(&mut p, ch, note(4 * BAR - STEP, BAR + 2 * STEP));
+        take.grow_to_position(&mut p, (7 * BAR) as f64);
+        take.finish(&mut p);
+        assert_eq!(p.pattern(pat).unwrap().length, 6 * BAR);
+    }
+
+    #[test]
+    fn take_end_note_ending_on_a_bar_line() {
+        let (mut p, pat, ch) = four_bars();
+        let mut take = PatternTake::start(&p, pat);
+        // Ends exactly at the end of bar 5: 5 bars, not 6.
+        take.add_note(&mut p, ch, note(5 * BAR - STEP, STEP));
+        take.grow_to_position(&mut p, (6 * BAR + 10) as f64);
+        take.finish(&mut p);
+        assert_eq!(p.pattern(pat).unwrap().length, 5 * BAR);
+        // Ending exactly at the original end: the original length.
+        let (mut p, pat, ch) = four_bars();
+        let mut take = PatternTake::start(&p, pat);
+        take.add_note(&mut p, ch, note(4 * BAR - STEP, STEP));
+        take.grow_to_position(&mut p, (5 * BAR + 10) as f64);
+        take.finish(&mut p);
+        assert_eq!(p.pattern(pat).unwrap().length, 4 * BAR);
+    }
+
+    #[test]
+    fn take_end_without_notes_past_the_end_keeps_the_original_length() {
+        // Nothing recorded at all.
+        let (mut p, pat, _) = four_bars();
+        let take = PatternTake::start(&p, pat);
+        take.grow_to_position(&mut p, (6 * BAR + 10) as f64);
+        assert_eq!(p.pattern(pat).unwrap().length, 7 * BAR);
+        take.finish(&mut p);
+        assert_eq!(p.pattern(pat).unwrap().length, 4 * BAR);
+        // Notes inside the pattern only.
+        let (mut p, pat, ch) = four_bars();
+        let mut take = PatternTake::start(&p, pat);
+        take.add_note(&mut p, ch, note(BAR, STEP));
+        take.grow_to_position(&mut p, (5 * BAR + 10) as f64);
+        take.finish(&mut p);
+        assert_eq!(p.pattern(pat).unwrap().length, 4 * BAR);
+        // A pattern that is not a whole number of bars keeps its length.
+        let (mut p, pat, ch) = four_bars();
+        p.pattern_mut(pat).unwrap().length = 3 * BAR + 8 * STEP;
+        let mut take = PatternTake::start(&p, pat);
+        take.add_note(&mut p, ch, note(0, STEP));
+        take.grow_to_position(&mut p, (4 * BAR + 10) as f64);
+        take.finish(&mut p);
+        assert_eq!(p.pattern(pat).unwrap().length, 3 * BAR + 8 * STEP);
+        // Unknown pattern: nothing happens.
+        let take = PatternTake::start(&p, PatternId(999));
+        take.finish(&mut p);
     }
 
     /// Song mode: 4-bar song with an empty one-bar pattern `a` and a two-bar pattern `b`.
