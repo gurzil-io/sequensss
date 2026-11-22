@@ -8,14 +8,13 @@
 use crate::splash_geom::{ASPECT, EYES, PINS};
 use crate::theme::{self, pal};
 use eframe::egui::{self, Color32, Mesh, Painter, Pos2, Rect, Sense, TextureHandle, pos2, vec2};
-use seq_i18n::trf;
 use std::f32::consts::TAU;
 
 const IMAGE: &[u8] = include_bytes!("../assets/splash-snake.png");
 const TITLE: &str = "SEQUENSSS";
 
 /// Seconds from the first frame to the end of the fade out.
-pub const DURATION: f32 = 1.8;
+pub const DURATION: f32 = 2.6;
 /// Fade into the app at the end.
 const FADE_OUT: f32 = 0.3;
 /// Faster fade after a tap or a key.
@@ -123,7 +122,7 @@ impl Splash {
         }
         let texture = self.texture.get_or_insert_with(|| load(ctx)).clone();
         let screen = ctx.screen_rect();
-        let subtitle = trf!("Séquenceur MIDI · v{}", "MIDI sequencer · v{}", self.version);
+        let subtitle = format!("v{}", self.version);
         // Covers the screen: taps land here, not on the UI behind.
         egui::Area::new(egui::Id::new("splash_input")).order(egui::Order::Debug).fixed_pos(screen.min).show(ctx, |ui| {
             ui.allocate_rect(screen, Sense::click());
