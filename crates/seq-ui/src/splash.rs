@@ -1,6 +1,7 @@
 //! Launch splash, drawn once above the UI while the app starts behind it: the snake fades in
 //! from the dark, its eyes light up and breathe, the pins of its MIDI connector light up one by
 //! one and the title types itself, then everything fades into the app (sooner on a tap or key).
+//! The snake hisses as its eyes light up: the app plays the sound while [`Splash::hissing`].
 //!
 //! The image and the eye / pin positions come from `assets/icon/make-icons.py`
 //! (`splash_geom.rs`), so the glows sit exactly on the drawing.
@@ -19,6 +20,8 @@ pub const DURATION: f32 = 2.6;
 const FADE_OUT: f32 = 0.3;
 /// Faster fade after a tap or a key.
 const SKIP_FADE: f32 = 0.18;
+/// The eyes start lighting up (and the snake hisses).
+const EYES_AT: f32 = 0.35;
 /// Longest step of the splash clock: slow first frames (texture upload, app start) don't
 /// swallow the fade in.
 const MAX_STEP: f32 = 1.0 / 20.0;
@@ -62,7 +65,7 @@ pub fn frame(t: f32, skipped_at: Option<f32>) -> Frame {
     // Eyes light up over 0.5 s, then breathe gently (continuous at the hand-over).
     let lit_at = 0.85;
     let breath = if t > lit_at { 0.85 + 0.15 * (TAU * (t - lit_at) / 1.1).cos() } else { 1.0 };
-    let eyes = smooth(ramp(t, 0.35, 0.5)) * breath;
+    let eyes = smooth(ramp(t, EYES_AT, 0.5)) * breath;
     let pins = std::array::from_fn(|i| smooth(ramp(t, 0.55 + 0.09 * i as f32, 0.06)));
     let letters = ramp(t, 0.45, 0.06 * TITLE.len() as f32) * TITLE.len() as f32;
     let natural = DURATION - FADE_OUT;
@@ -92,12 +95,13 @@ pub struct Splash {
     t: f32,
     last: Option<f64>,
     skipped_at: Option<f32>,
+    done: bool,
 }
 
 impl Splash {
     /// `version`: shown under the title.
     pub fn new(version: &str) -> Self {
-        Splash { version: version.to_owned(), texture: None, t: 0.0, last: None, skipped_at: None }
+        Splash { version: version.to_owned(), texture: None, t: 0.0, last: None, skipped_at: None, done: false }
     }
 
     /// Draws one frame above everything and swallows the input; `false` once it is over.
@@ -118,6 +122,7 @@ impl Splash {
 
         let f = frame(self.t, self.skipped_at);
         if f.done {
+            self.done = true;
             return false;
         }
         let texture = self.texture.get_or_insert_with(|| load(ctx)).clone();
@@ -133,6 +138,12 @@ impl Splash {
         paint(&p, screen, &f, &texture, &subtitle);
         ctx.request_repaint();
         true
+    }
+
+    /// The hiss should be sounding: from the eyes lighting up until the splash is skipped or
+    /// over (the app then fades it out).
+    pub fn hissing(&self) -> bool {
+        self.t >= EYES_AT && self.skipped_at.is_none() && !self.done
     }
 }
 
@@ -335,6 +346,28 @@ mod tests {
             t += 1.0 / 60.0;
         }
         assert!(t - 0.1 < (SKIP_FADE + 0.05) as f64, "skipped after {t}");
+    }
+
+    #[test]
+    fn hisses_with_the_eyes_until_skipped_or_over() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut splash = Splash::new("1.2.3");
+        let mut t = 0.0;
+        while run(&ctx, &mut splash, t, Vec::new()).0 {
+            assert_eq!(splash.hissing(), splash.t >= EYES_AT, "{t}");
+            t += 1.0 / 60.0;
+        }
+        assert!(!splash.hissing());
+
+        let mut splash = Splash::new("1.2.3");
+        for i in 0..30 {
+            run(&ctx, &mut splash, i as f64 / 60.0, Vec::new());
+        }
+        assert!(splash.hissing());
+        let click = egui::Event::PointerButton { pos: pos2(10.0, 10.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() };
+        assert!(run(&ctx, &mut splash, 0.5, vec![click]).0);
+        assert!(!splash.hissing());
     }
 
     #[test]

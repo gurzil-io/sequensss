@@ -29,6 +29,18 @@ use std::time::Duration;
 
 /// Sample rate used for export when no device is open.
 const EXPORT_SR: u32 = 48_000;
+/// Snake hiss of the launch splash (source and conversion: `assets/audio/README.md`).
+const HISS: &[u8] = include_bytes!("../assets/splash-hiss.wav");
+/// Hiss level (-6 dB): under the default kit.
+const HISS_GAIN: f32 = 0.5;
+
+/// Where the splash hiss is at.
+#[derive(Clone, Copy, PartialEq)]
+enum Hiss {
+    Waiting,
+    Playing,
+    Over,
+}
 
 enum Pending {
     New(usize),
@@ -44,6 +56,7 @@ struct App {
     ui: SeqUi,
     /// Launch splash, dropped once it has faded out.
     splash: Option<Splash>,
+    hiss: Hiss,
     file: Option<PathBuf>,
     saved: Project,
 
@@ -112,6 +125,7 @@ impl App {
             project,
             ui,
             splash: Some(Splash::new(update::CURRENT)),
+            hiss: Hiss::Waiting,
             file,
             audio: None,
             handle: None,
@@ -235,6 +249,29 @@ impl App {
             }
         }
         self.ui.devices.current_in = self.midi_in_choice.clone();
+    }
+
+    /// Splash hiss: starts with the eyes as soon as the engine is up (never once the splash
+    /// is gone), fades out when the splash is skipped or over.
+    fn splash_hiss(&mut self, hissing: bool) {
+        match self.hiss {
+            Hiss::Waiting if hissing && self.handle.is_some() => {
+                self.hiss = Hiss::Over;
+                match seq_io::samples::decode_wav(HISS) {
+                    Ok(s) => {
+                        let sample = Box::new(s.resampled(self.sample_rate));
+                        self.send(EngineCmd::PlaySound { sample, gain: HISS_GAIN });
+                        self.hiss = Hiss::Playing;
+                    }
+                    Err(e) => eprintln!("splash hiss: {e}"),
+                }
+            }
+            Hiss::Playing if !hissing => {
+                self.send(EngineCmd::StopSound);
+                self.hiss = Hiss::Over;
+            }
+            _ => {}
+        }
     }
 
     fn send(&mut self, cmd: EngineCmd) {
@@ -819,10 +856,13 @@ impl eframe::App for App {
         self.ui.dirty = self.is_dirty();
 
         // Before the UI: the tap or key that skips the splash must not reach it.
-        if let Some(splash) = &mut self.splash
-            && !splash.show(ctx)
-        {
-            self.splash = None;
+        if let Some(splash) = &mut self.splash {
+            let up = splash.show(ctx);
+            let hissing = splash.hissing();
+            if !up {
+                self.splash = None;
+            }
+            self.splash_hiss(hissing);
         }
         let actions = self.ui.show(ctx, &mut self.project, &info);
         for a in actions {
@@ -883,4 +923,19 @@ pub fn run(options: eframe::NativeOptions, path: Option<PathBuf>, files: Files, 
             Ok(Box::new(App::new(path, files, settings)))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splash_hiss_decodes() {
+        let s = seq_io::samples::decode_wav(HISS).unwrap();
+        assert_eq!(s.sample_rate, 44_100);
+        assert!((1.5..2.5).contains(&(s.len() as f32 / 44_100.0)));
+        let peak = s.left.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!(peak > 0.5 && peak * HISS_GAIN < 0.5, "{peak}");
+        assert_eq!(s.resampled(48_000).len(), s.len() * 48_000 / 44_100);
+    }
 }

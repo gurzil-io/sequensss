@@ -34,6 +34,7 @@ use crate::arp::ArpState;
 use crate::clock::samples_per_tick;
 use crate::graph::{ChannelParams, CompiledPattern, PlaybackGraph};
 use crate::instrument::Instrument;
+use crate::sample::SampleData;
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use seq_model::*;
 use std::sync::Arc;
@@ -74,6 +75,12 @@ pub enum EngineCmd {
     SetMetronome(bool),
     /// One bar of clicks before playback when Play starts from stop with recording on.
     SetCountIn(bool),
+    /// Plays a sound once on the master output (app sounds, e.g. the launch splash), whatever
+    /// the transport, the channels and mute/solo. `sample` must be at the engine's rate; it
+    /// replaces the sound playing, if any.
+    PlaySound { sample: Box<SampleData>, gain: f32 },
+    /// Fades the sound out quickly (`SOUND_STOP_FADE`).
+    StopSound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,6 +97,7 @@ pub enum EngineEvent {
 pub enum Garbage {
     Graph(#[allow(dead_code)] Box<PlaybackGraph>),
     Slot(#[allow(dead_code)] SlotKind),
+    Sound(#[allow(dead_code)] Box<SampleData>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,6 +298,42 @@ impl Click {
     }
 }
 
+/// Fade at both ends of a sound (no click on a sample that starts or ends off zero).
+const SOUND_EDGE: f64 = 0.005;
+/// Fade out after `StopSound`.
+pub const SOUND_STOP_FADE: f64 = 0.15;
+
+/// Sound playing on the master output (`EngineCmd::PlaySound`).
+struct Sound {
+    sample: Box<SampleData>,
+    gain: f32,
+    pos: usize,
+    /// Fade length at both ends, in frames.
+    edge: usize,
+    /// Stop fade: current level and decrement per frame (0 while not stopping).
+    level: f32,
+    fall: f32,
+}
+
+impl Sound {
+    /// Adds the next `l.len()` frames to `l` / `r`; `false` once over.
+    fn mix(&mut self, l: &mut [f32], r: &mut [f32]) -> bool {
+        let len = self.sample.len();
+        for (l, r) in l.iter_mut().zip(r.iter_mut()) {
+            if self.pos >= len || self.level <= 0.0 {
+                return false;
+            }
+            let edge = self.pos.min(len - 1 - self.pos).min(self.edge) as f32 / self.edge.max(1) as f32;
+            let g = self.gain * edge * self.level;
+            *l += self.sample.left[self.pos] * g;
+            *r += self.sample.right[self.pos] * g;
+            self.pos += 1;
+            self.level -= self.fall;
+        }
+        self.pos < len && self.level > 0.0
+    }
+}
+
 pub struct Engine {
     sr: f64,
     graph: Option<Box<PlaybackGraph>>,
@@ -329,6 +373,7 @@ pub struct Engine {
 
     metronome: bool,
     click: Click,
+    sound: Option<Sound>,
     live_channel: Option<ChannelId>,
     recording: bool,
     count_in_on: bool,
@@ -396,6 +441,7 @@ impl Engine {
             midi_pan: [[0; 16]; MAX_MIDI_OUTS],
             metronome: false,
             click: Click::new(sr as f32),
+            sound: None,
             live_channel: None,
             recording: false,
             count_in_on: false,
@@ -662,6 +708,18 @@ impl Engine {
             }
             EngineCmd::SetMetronome(m) => self.metronome = m,
             EngineCmd::SetCountIn(c) => self.count_in_on = c,
+            EngineCmd::PlaySound { sample, gain } => {
+                let edge = (SOUND_EDGE * self.sr) as usize;
+                let new = Sound { sample, gain, pos: 0, edge, level: 1.0, fall: 0.0 };
+                if let Some(old) = self.sound.replace(new) {
+                    self.trash(Garbage::Sound(old.sample));
+                }
+            }
+            EngineCmd::StopSound => {
+                if let Some(s) = self.sound.as_mut().filter(|s| s.fall == 0.0) {
+                    s.fall = 1.0 / (SOUND_STOP_FADE * self.sr).max(1.0) as f32;
+                }
+            }
         }
     }
 
@@ -1328,6 +1386,12 @@ impl Engine {
                 s.peak_l = s.peak_l.max(l.abs());
                 s.peak_r = s.peak_r.max(r.abs());
             }
+        }
+        if let Some(s) = self.sound.as_mut()
+            && !s.mix(&mut self.mix_l[..n], &mut self.mix_r[..n])
+            && let Some(s) = self.sound.take()
+        {
+            self.trash(Garbage::Sound(s.sample));
         }
         for j in 0..n {
             let c = self.click_buf[j] * 0.5;
@@ -3023,5 +3087,93 @@ mod tests {
             peak(&mut e);
         }
         assert!(peak(&mut e) < 1e-4);
+    }
+
+    fn sound(sr: u32, secs: f64) -> Box<SampleData> {
+        Box::new(SampleData::from_mono(sr, vec![0.5; (secs * sr as f64) as usize]))
+    }
+
+    /// Renders `frames` frames in blocks of 256; returns the left channel.
+    fn render(e: &mut Engine, frames: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        let mut buf = [0.0; 512];
+        while out.len() < frames {
+            let n = 256.min(frames - out.len());
+            e.process(&mut buf[..n * 2], 2, 0.0);
+            out.extend(buf[..n * 2].iter().step_by(2));
+        }
+        out
+    }
+
+    #[test]
+    fn sound_plays_once_then_goes_back_as_garbage() {
+        let sr = 48_000;
+        let (mut e, mut h) = Engine::new(sr, None, None);
+        e.handle_cmd(EngineCmd::PlaySound { sample: sound(sr, 0.1), gain: 0.5 });
+        let len = sr as usize / 10;
+        let edge = (SOUND_EDGE * sr as f64) as usize;
+        let out = render(&mut e, 2 * len);
+        // Fades in from silence, plays at its gain, fades out, then silence.
+        assert_eq!(out[0], 0.0);
+        assert!(out[..=edge].windows(2).all(|w| w[1] > w[0]));
+        assert!(out[edge..len - edge].iter().all(|&x| (x - 0.25).abs() < 1e-6));
+        assert!(out[len - edge..len].windows(2).all(|w| w[1] < w[0]));
+        assert!(out[len - 1..].iter().all(|&x| x == 0.0));
+        assert!(matches!(h.garbage.pop(), Ok(Garbage::Sound(_))));
+        assert!(h.garbage.pop().is_err());
+    }
+
+    #[test]
+    fn stop_fades_the_sound_out() {
+        let sr = 48_000;
+        let (mut e, mut h) = Engine::new(sr, None, None);
+        e.handle_cmd(EngineCmd::PlaySound { sample: sound(sr, 2.0), gain: 1.0 });
+        let before = render(&mut e, 4800);
+        e.handle_cmd(EngineCmd::StopSound);
+        // A second stop does not restart the fade.
+        let fade = (SOUND_STOP_FADE * sr as f64) as usize;
+        let mut out = render(&mut e, fade / 2);
+        e.handle_cmd(EngineCmd::StopSound);
+        out.extend(render(&mut e, fade / 2 + 4800));
+        assert!((out[0] - before[before.len() - 1]).abs() < 1e-3, "no jump at the stop");
+        assert!(out[..fade].windows(2).all(|w| w[1] <= w[0]));
+        assert!((out[fade / 2] - 0.25).abs() < 1e-3);
+        assert!(out[fade + 1..].iter().all(|&x| x == 0.0));
+        assert!(matches!(h.garbage.pop(), Ok(Garbage::Sound(_))));
+        assert!(h.garbage.pop().is_err());
+
+        // A new sound replaces the one playing; the old one goes back as garbage.
+        e.handle_cmd(EngineCmd::PlaySound { sample: sound(sr, 1.0), gain: 1.0 });
+        e.handle_cmd(EngineCmd::PlaySound { sample: sound(sr, 0.1), gain: 1.0 });
+        assert!(matches!(h.garbage.pop(), Ok(Garbage::Sound(_))));
+        let out = render(&mut e, sr as usize / 5);
+        assert!(out[sr as usize / 10..].iter().all(|&x| x == 0.0));
+        assert!(matches!(h.garbage.pop(), Ok(Garbage::Sound(_))));
+    }
+
+    #[test]
+    fn sound_leaves_the_transport_alone() {
+        let sr = 48_000;
+        let (p, ch, pat) = project_with_steps(&[0, 4, 8, 12], 16);
+        let (mut a, _ha, log_a) = engine_with_probe(&p, ch, sr, PlayMode::Pattern(pat));
+        let (mut b, hb, log_b) = engine_with_probe(&p, ch, sr, PlayMode::Pattern(pat));
+        b.handle_cmd(EngineCmd::PlaySound { sample: sound(sr, 0.5), gain: 0.5 });
+        render(&mut a, 30_000);
+        b.handle_cmd(EngineCmd::StopSound);
+        render(&mut b, 30_000);
+        assert_eq!(a.position(), b.position());
+        assert_eq!(ons(&log_a), ons(&log_b));
+        assert!(hb.shared.playing());
+
+        // Transport stopped and every channel muted: the sound still plays, nothing moves.
+        let mut p = p;
+        p.channel_mut(ch).unwrap().mute = true;
+        let (mut e, h) = Engine::new(sr, None, None);
+        e.handle_cmd(EngineCmd::SwapGraph(Box::new(compile(&p))));
+        e.handle_cmd(EngineCmd::PlaySound { sample: sound(sr, 0.5), gain: 0.5 });
+        let out = render(&mut e, 10_000);
+        assert!(out.iter().any(|&x| x > 0.2));
+        assert_eq!(e.position(), 0.0);
+        assert!(!h.shared.playing());
     }
 }

@@ -11,7 +11,15 @@ pub fn probe_wav(path: &Path) -> Result<()> {
 }
 
 pub fn load_wav(path: &Path) -> Result<SampleData> {
-    let mut reader = hound::WavReader::open(path)?;
+    decode(hound::WavReader::open(path)?)
+}
+
+/// Decodes a WAV file held in memory (sounds embedded in the app).
+pub fn decode_wav(bytes: &[u8]) -> Result<SampleData> {
+    decode(hound::WavReader::new(std::io::Cursor::new(bytes))?)
+}
+
+fn decode<R: std::io::Read>(mut reader: hound::WavReader<R>) -> Result<SampleData> {
     let spec = reader.spec();
     let ch = spec.channels.max(1) as usize;
     let interleaved: Vec<f32> = match spec.sample_format {
@@ -75,6 +83,21 @@ mod tests {
             }
         }
         w.finalize().unwrap();
+    }
+
+    #[test]
+    fn wav_from_memory() {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        let spec = hound::WavSpec { channels: 1, sample_rate: 44_100, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut w = hound::WavWriter::new(&mut bytes, spec).unwrap();
+        for s in [0i16, 16384, -16384] {
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+        let s = decode_wav(bytes.get_ref()).unwrap();
+        assert_eq!((s.sample_rate, s.left.clone()), (44_100, vec![0.0, 0.5, -0.5]));
+        assert_eq!(s.left, s.right);
+        assert!(decode_wav(b"not a wav").is_err());
     }
 
     #[test]
