@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same as the Display theme background (seq-ui theme.rs), so that the launch window and
+         the first frame are dark and lead straight into the in-app splash. -->
+    <color name="launch_background">#0A0D0C</color>
+
+    <style name="Base.Theme.Sequensss" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/launch_background</item>
+        <item name="android:colorBackground">@color/launch_background</item>
+        <item name="android:statusBarColor">@color/launch_background</item>
+        <item name="android:navigationBarColor">@color/launch_background</item>
+    </style>
+
+    <style name="Theme.Sequensss" parent="Base.Theme.Sequensss" />
+</resources>
