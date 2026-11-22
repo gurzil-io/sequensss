@@ -128,6 +128,9 @@ impl App {
             }
             UiAction::BrowserSaveAs => self.ask_save_name(),
             UiAction::BrowserImport => platform::pick("project", PROJECTS, &["application/octet-stream", "*/*"]),
+            UiAction::AskPatternName(name) => {
+                platform::prompt("pattern_name", tr!("Nom du pattern", "Pattern name"), &name, "OK", tr!("Annuler", "Cancel"));
+            }
             _ => {}
         }
     }
@@ -147,6 +150,7 @@ impl App {
                     self.save_to(path);
                     self.refresh_browser();
                 }
+                "pattern_name" => self.ui.set_pattern_name(value),
                 "sample" => {
                     let target = self.pending_sample.take().flatten();
                     self.load_sample_path(target, PathBuf::from(value));

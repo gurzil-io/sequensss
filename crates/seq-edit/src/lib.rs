@@ -283,17 +283,82 @@ pub fn move_channel(project: &mut Project, channel: ChannelId, up: bool) {
     }
 }
 
+/// Adds an empty one-bar pattern with a random color, at the end of the list.
 pub fn new_pattern(project: &mut Project) -> PatternId {
     let n = project.patterns.len() + 1;
     let len = project.bar_len();
-    project.add_pattern(&format!("Pattern {n}"), len)
+    let id = project.add_pattern(&format!("Pattern {n}"), len);
+    let color = fresh_color(project, id);
+    if let Some(p) = project.pattern_mut(id) {
+        p.color = Some(color);
+    }
+    id
 }
 
+/// Copies a pattern (notes and length) right after it, with a color of its own.
 pub fn clone_pattern(project: &mut Project, pattern: PatternId) -> Option<PatternId> {
     let src = project.pattern(pattern)?.clone();
     let id = project.add_pattern(&seq_i18n::trf!("{} (copie)", "{} (copy)", src.name), src.length);
-    project.pattern_mut(id)?.notes = src.notes;
+    let color = fresh_color(project, id);
+    let p = project.pattern_mut(id)?;
+    p.notes = src.notes;
+    p.color = Some(color);
+    // `add_pattern` put it last: it goes next to its source.
+    if let Some(i) = project.patterns.iter().position(|p| p.id == pattern) {
+        let copy = project.patterns.pop()?;
+        project.patterns.insert(i + 1, copy);
+    }
     Some(id)
+}
+
+/// A random color for pattern `id`, away from the colors other patterns already have.
+fn fresh_color(project: &Project, id: PatternId) -> Rgb {
+    use std::hash::BuildHasher;
+    let taken: Vec<Rgb> = project.patterns.iter().filter(|p| p.id != id).filter_map(|p| p.color).collect();
+    let seed = std::collections::hash_map::RandomState::new().hash_one(id.0);
+    pick_pattern_color(seed, &taken)
+}
+
+/// Renames a pattern (trimmed). An empty name is refused (`false`).
+pub fn rename_pattern(project: &mut Project, pattern: PatternId, name: &str) -> bool {
+    let name = name.trim();
+    match project.pattern(pattern) {
+        Some(p) if !name.is_empty() && p.name != name => {
+            if let Some(p) = project.pattern_mut(pattern) {
+                p.name = name.to_string();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Changes a pattern's color (a pattern that keeps its color stays shared with the undo history).
+pub fn set_pattern_color(project: &mut Project, pattern: PatternId, color: Rgb) {
+    if project.pattern(pattern).is_some_and(|p| p.color != Some(color))
+        && let Some(p) = project.pattern_mut(pattern)
+    {
+        p.color = Some(color);
+    }
+}
+
+/// Whether a pattern can move one place up (`up`) or down in the list.
+pub fn can_move_pattern(project: &Project, pattern: PatternId, up: bool) -> bool {
+    match project.patterns.iter().position(|p| p.id == pattern) {
+        Some(i) => if up { i > 0 } else { i + 1 < project.patterns.len() },
+        None => false,
+    }
+}
+
+/// Moves a pattern one place up or down in the list. Returns `false` at the ends.
+pub fn move_pattern(project: &mut Project, pattern: PatternId, up: bool) -> bool {
+    if !can_move_pattern(project, pattern, up) {
+        return false;
+    }
+    let i = project.patterns.iter().position(|p| p.id == pattern).unwrap_or_default();
+    let j = if up { i - 1 } else { i + 1 };
+    project.patterns.swap(i, j);
+    true
 }
 
 /// Deletes a pattern and its clips. Refuses to delete the last one.
@@ -1057,6 +1122,66 @@ mod tests {
         replace_kind(&mut p, ch, k);
         assert_eq!(p.channel(ch).unwrap().kind, ChannelKind::MidiOut { channel: 9, out: 0 });
         assert_eq!(p.channel(ch).unwrap().previous_kinds, vec![ChannelKind::Synth(sp)]);
+    }
+
+    #[test]
+    fn new_and_cloned_patterns_get_their_own_colors() {
+        let (mut p, pat, ch) = setup();
+        let a = new_pattern(&mut p);
+        let b = new_pattern(&mut p);
+        let (ca, cb) = (p.pattern(a).unwrap().color.unwrap(), p.pattern(b).unwrap().color.unwrap());
+        assert_ne!(ca, cb);
+        set_step(&mut p, pat, ch, 2, true);
+        let c = clone_pattern(&mut p, pat).unwrap();
+        // Right after its source, same notes and length, another color.
+        let order: Vec<PatternId> = p.patterns.iter().map(|p| p.id).collect();
+        assert_eq!(order, vec![pat, c, a, b]);
+        let (src, copy) = (p.pattern(pat).unwrap(), p.pattern(c).unwrap());
+        assert_eq!((&copy.notes, copy.length), (&src.notes, src.length));
+        assert!(copy.color.is_some() && copy.color != Some(ca) && copy.color != Some(cb));
+        assert!(copy.name.starts_with(&src.name));
+    }
+
+    #[test]
+    fn rename_and_recolor_pattern_in_one_undo_step() {
+        let (mut p, pat, _) = setup();
+        let before = p.pattern(pat).unwrap().clone();
+        let mut h = History::new(&p, 100);
+        assert!(!rename_pattern(&mut p, pat, "   "));
+        assert!(!rename_pattern(&mut p, pat, &before.name));
+        set_pattern_color(&mut p, pat, [1, 2, 3]);
+        assert!(rename_pattern(&mut p, pat, "  Chorus "));
+        assert_eq!(p.pattern(pat).unwrap().name, "Chorus");
+        assert_eq!(p.pattern(pat).unwrap().color, Some([1, 2, 3]));
+        assert!(h.commit_if_changed(&p, false));
+        assert!(h.undo(&mut p));
+        assert_eq!(*p.pattern(pat).unwrap(), before);
+        // Same color again: nothing changes, nothing to commit.
+        assert!(h.redo(&mut p));
+        set_pattern_color(&mut p, pat, [1, 2, 3]);
+        assert!(!h.commit_if_changed(&p, false));
+    }
+
+    #[test]
+    fn move_pattern_up_and_down() {
+        let (mut p, a, _) = setup();
+        let b = new_pattern(&mut p);
+        let c = new_pattern(&mut p);
+        let order = |p: &Project| p.patterns.iter().map(|p| p.id).collect::<Vec<_>>();
+        assert!(!can_move_pattern(&p, a, true) && can_move_pattern(&p, a, false));
+        assert!(can_move_pattern(&p, c, true) && !can_move_pattern(&p, c, false));
+        assert!(!move_pattern(&mut p, a, true));
+        assert!(!move_pattern(&mut p, c, false));
+        assert_eq!(order(&p), vec![a, b, c]);
+        let mut h = History::new(&p, 100);
+        assert!(move_pattern(&mut p, c, true));
+        assert_eq!(order(&p), vec![a, c, b]);
+        assert!(move_pattern(&mut p, a, false));
+        assert_eq!(order(&p), vec![c, a, b]);
+        assert!(!can_move_pattern(&p, PatternId(999), true));
+        assert!(h.commit_if_changed(&p, false));
+        assert!(h.undo(&mut p));
+        assert_eq!(order(&p), vec![a, b, c]);
     }
 
     #[test]

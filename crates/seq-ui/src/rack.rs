@@ -1,6 +1,7 @@
 //! Channel rack: one row per channel (mute, solo, tile, step sequencer steps).
 
 use crate::icons::Icon;
+use crate::pattern_menu;
 use crate::skin::{self, Kind};
 use crate::theme::*;
 use crate::widgets::Pointer;
@@ -94,9 +95,13 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let pat_id = st.pattern;
 
     let res = skin::panel(ui, rect, "CHANNEL RACK", pal().orange, |ui| {
-        // Current pattern + pattern management.
-        let (name, color) = project.pattern(pat_id).map(|p| (p.name.clone(), id_color(p.id.0))).unwrap_or_default();
-        skin::dropdown(ui, "rack_pat", vec2(170.0, 38.0), Some((color, false)), &name, None, |ui| {
+        // Current pattern, and its menu (⋯) right next to it.
+        let (name, color) = project.pattern(pat_id).map(|p| (p.name.clone(), pattern_menu::pattern_rgb(p))).unwrap_or_default();
+        ui.spacing_mut().item_spacing.x = 4.0;
+        // Narrower when the header is short (docked on a tablet with the Retro title), so
+        // the ⋯ button and the length controls still fit.
+        let pat_w = (ui.available_width() - 48.0 - 140.0).clamp(110.0, 170.0);
+        skin::dropdown(ui, "rack_pat", vec2(pat_w, 38.0), Some((color, false)), &name, None, |ui| {
             skin::menu_caption(ui, "PATTERNS");
             let mut pick = None;
             for p in &project.patterns {
@@ -111,23 +116,20 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             if skin::menu_item(ui, tr!("+ Nouveau pattern", "+ New pattern"), pal().text, false).clicked() {
                 st.pattern = seq_edit::new_pattern(project);
             }
-            if skin::menu_item(ui, tr!("Cloner", "Clone"), pal().text, false).clicked()
-                && let Some(id) = seq_edit::clone_pattern(project, st.pattern)
-            {
-                st.pattern = id;
-            }
-            if skin::menu_item(ui, tr!("Renommer…", "Rename…"), pal().text, false).clicked() {
-                st.renaming_pattern = Some((st.pattern, name.clone()));
-            }
-            if project.patterns.len() <= 1 {
-                skin::menu_disabled(ui, tr!("Dernier pattern, impossible à supprimer", "Last pattern, can't be deleted"));
-            } else if skin::menu_item(ui, tr!("Supprimer", "Delete"), pal().danger, false).clicked() {
-                seq_edit::delete_pattern(project, st.pattern);
-            }
         });
+        let open = pattern_menu::is_open_for(st, ui.ctx(), pat_id);
+        let more = skin::button(ui, vec2(44.0, 38.0), Kind::Dark, open, |p, r, c| {
+            for dx in [-8.0, 0.0, 8.0] {
+                p.circle_filled(pos2(r.center().x + dx, r.center().y), 2.6, c);
+            }
+        })
+        .on_hover_text(tr!("Pattern : cloner, modifier, déplacer, supprimer…", "Pattern: clone, edit, move, delete…"));
+        if more.clicked() {
+            pattern_menu::toggle(st, ui.ctx(), pat_id, more.rect);
+        }
+        ui.add_space(4.0);
         // Length: − / + one bar. Painting past the end also grows the pattern.
         if let Some(pat) = project.pattern(pat_id) {
-            ui.spacing_mut().item_spacing.x = 4.0;
             let (len, shorter, longer) = (pat.length, seq_edit::shorter_length(pat, bar), seq_edit::longer_length(pat, bar));
             let tip = tr!("Retirer la dernière mesure (si elle est vide)", "Remove the last bar (if it is empty)");
             let minus = ui

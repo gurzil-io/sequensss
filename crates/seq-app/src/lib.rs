@@ -141,6 +141,8 @@ impl App {
             #[cfg(target_os = "android")]
             pending_sample: None,
         };
+        // Android: the soft keyboard cannot type into egui, text goes through a system dialog.
+        app.ui.native_text_input = cfg!(target_os = "android");
         app.show_known_update();
         app.start_update_check();
         app.refresh_devices();
@@ -723,14 +725,16 @@ impl App {
             | UiAction::BrowserShare(_)
             | UiAction::BrowserDelete(_)
             | UiAction::BrowserSaveAs
-            | UiAction::BrowserImport) => self.browser_action(a),
-            // Desktop: native dialogs, no browser.
+            | UiAction::BrowserImport
+            | UiAction::AskPatternName(_)) => self.browser_action(a),
+            // Desktop: native dialogs, no browser; text is typed in the app.
             #[cfg(not(target_os = "android"))]
             UiAction::BrowserOpen(_)
             | UiAction::BrowserShare(_)
             | UiAction::BrowserDelete(_)
             | UiAction::BrowserSaveAs
-            | UiAction::BrowserImport => {}
+            | UiAction::BrowserImport
+            | UiAction::AskPatternName(_) => {}
         }
     }
 

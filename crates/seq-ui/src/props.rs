@@ -60,28 +60,6 @@ fn arp_window(st: &mut SeqUi, ctx: &egui::Context, project: &mut Project) {
 }
 
 fn rename_windows(st: &mut SeqUi, ctx: &egui::Context, project: &mut Project) {
-    if let Some((pid, mut name)) = st.renaming_pattern.take() {
-        let mut keep = true;
-        window(tr!("RENOMMER LE PATTERN", "RENAME PATTERN").into(), "rename_pat").show(ctx, |ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(300.0).font(body(17.0)));
-            r.request_focus();
-            ui.horizontal(|ui| {
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if skin::text_button(ui, vec2(110.0, 40.0), Kind::Orange, "OK", body(15.0)).clicked() || enter {
-                    if let (Some(p), false) = (project.pattern_mut(pid), name.trim().is_empty()) {
-                        p.name = name.trim().to_string();
-                    }
-                    keep = false;
-                }
-                if skin::text_button(ui, vec2(110.0, 40.0), Kind::Cream, tr!("Annuler", "Cancel"), body(15.0)).clicked() {
-                    keep = false;
-                }
-            });
-        });
-        if keep {
-            st.renaming_pattern = Some((pid, name));
-        }
-    }
     if let Some((cid, mut name)) = st.renaming_channel.take() {
         let mut keep = true;
         window(tr!("RENOMMER LE CHANNEL", "RENAME CHANNEL").into(), "rename_ch").show(ctx, |ui| {

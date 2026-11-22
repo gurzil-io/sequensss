@@ -6,9 +6,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub mod arp;
+mod color;
 mod cow;
 mod kits;
 pub use arp::{ARP_RATES, ArpChord, ArpDirection, ArpParams, arp_rate_name};
+pub use color::{PATTERN_SAT, PATTERN_VAL, Rgb, hsv_rgb, hue_distance, pattern_color, pick_pattern_color, rgb_hue};
 pub use cow::CowArc;
 pub use kits::{KITS, Kit};
 
@@ -269,6 +271,10 @@ pub struct Pattern {
     pub length: Tick,
     /// Notes per channel. The step sequencer and piano roll edit the same notes.
     pub notes: BTreeMap<ChannelId, Vec<Note>>,
+    /// Color chosen for the pattern. Missing (older files, starter projects): a color of
+    /// the theme, from the id. Not written when missing: older versions read the file as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Rgb>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -475,6 +481,7 @@ impl Project {
             name: name.to_string(),
             length,
             notes: BTreeMap::new(),
+            color: None,
         }));
         id
     }

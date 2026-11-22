@@ -70,3 +70,20 @@ fn note_pan_round_trip() {
     p.pattern_mut(verse).unwrap().notes.get_mut(&lead).unwrap()[1].pan = 0;
     assert_eq!(pretty(&p), V1);
 }
+
+#[test]
+fn pattern_color_round_trip() {
+    let mut p: Project = ron::from_str(V1).unwrap();
+    // Pattern colors did not exist yet: the theme's, from the id.
+    assert!(p.patterns.iter().all(|pt| pt.color.is_none()));
+    let verse = p.patterns[1].id;
+    p.pattern_mut(verse).unwrap().color = Some([12, 200, 255]);
+    let text = pretty(&p);
+    assert_eq!(text.matches("color:").count(), 1);
+    let back: Project = ron::from_str(&text).unwrap();
+    assert_eq!(back, p);
+    assert_eq!(back.pattern(verse).unwrap().color, Some([12, 200, 255]));
+    // No custom color again: the file is the old one, byte for byte.
+    p.pattern_mut(verse).unwrap().color = None;
+    assert_eq!(pretty(&p), V1);
+}

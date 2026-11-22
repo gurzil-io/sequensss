@@ -19,6 +19,7 @@ mod compact;
 mod icons;
 mod midi_panel;
 mod notice;
+mod pattern_menu;
 mod piano;
 mod playlist;
 mod props;
@@ -72,6 +73,9 @@ pub enum UiAction {
     BrowserDelete(String),
     BrowserSaveAs,
     BrowserImport,
+    /// Ask for a pattern name in the system's text dialog (when `native_text_input`), from
+    /// this one; the answer goes to [`SeqUi::set_pattern_name`].
+    AskPatternName(String),
 }
 
 /// "Language" section of the menus: one entry per language, each named in its own language.
@@ -215,7 +219,13 @@ pub struct SeqUi {
     edit_cmd: Option<(Editor, EditCmd)>,
     synth_open: Option<ChannelId>,
     arp_open: Option<ChannelId>,
-    renaming_pattern: Option<(PatternId, String)>,
+    /// Pattern menu (timeline list, rack ⋯ button) and the dialogs it opens.
+    pattern_menu: Option<pattern_menu::PatternMenu>,
+    pattern_edit: Option<pattern_menu::PatternEdit>,
+    pattern_delete: Option<PatternId>,
+    /// Text is typed in the system's dialog rather than in the app (Android: the soft
+    /// keyboard cannot type into egui). Set by the app.
+    pub native_text_input: bool,
     renaming_channel: Option<(ChannelId, String)>,
     /// Channel menu showing the "Replace with" choices.
     replacing: Option<ChannelId>,
@@ -269,7 +279,10 @@ impl SeqUi {
             edit_cmd: None,
             synth_open: None,
             arp_open: None,
-            renaming_pattern: None,
+            pattern_menu: None,
+            pattern_edit: None,
+            pattern_delete: None,
+            native_text_input: false,
             renaming_channel: None,
             replacing: None,
             step_paint: None,
@@ -299,7 +312,7 @@ impl SeqUi {
         let status = std::mem::take(&mut self.status);
         let update = self.update.take();
         let (focus, tab, check_updates) = (self.focus, self.tab, self.check_updates);
-        let (quantize, count_in) = (self.quantize, self.count_in);
+        let (quantize, count_in, native) = (self.quantize, self.count_in, self.native_text_input);
         let clipboard = std::mem::take(&mut self.channel_clipboard);
         *self = SeqUi::new(project);
         self.channel_clipboard = clipboard;
@@ -309,6 +322,7 @@ impl SeqUi {
         self.check_updates = check_updates;
         self.quantize = quantize;
         self.count_in = count_in;
+        self.native_text_input = native;
         self.focus = focus;
         self.tab = tab;
     }
@@ -317,6 +331,16 @@ impl SeqUi {
     /// (1 when the snap is free).
     pub fn record_grid(&self) -> Tick {
         if self.quantize { self.piano.snap() } else { 0 }
+    }
+
+    /// Name typed in the system's text dialog (see [`UiAction::AskPatternName`]).
+    pub fn set_pattern_name(&mut self, name: String) {
+        pattern_menu::set_edit_name(self, name);
+    }
+
+    /// Clears the timeline's clip selection (clips removed with a pattern).
+    fn playlist_deselect(&mut self) {
+        self.playlist.deselect();
     }
 
     fn act(&mut self, a: UiAction) {
@@ -441,6 +465,7 @@ impl SeqUi {
                     PanelId::Piano => piano::show(self, &mut pu, rect, project, info),
                 }
             }
+            pattern_menu::show(self, ui, project);
         });
 
         if self.fullscreen() {
@@ -448,6 +473,7 @@ impl SeqUi {
         }
         self.settings_dialog(ctx, project, info);
         props::windows(self, ctx, project);
+        pattern_menu::dialogs(self, ctx, project);
         self.browser_window(ctx);
         self.update_notice(ctx);
         self.toast(ctx);
@@ -590,7 +616,7 @@ impl SeqUi {
 
     /// A modal dialog is open: the editors behind it get no edit commands.
     fn modal_open(&self) -> bool {
-        self.settings_open
+        self.settings_open || self.pattern_edit.is_some() || self.pattern_delete.is_some()
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {

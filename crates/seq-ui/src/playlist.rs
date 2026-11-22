@@ -1,10 +1,10 @@
 //! Timeline (playlist): pattern palette, tracks × time, clips, tools (draw / select / erase
 //! / brush, as in the piano roll), multi-selection, selection loop, track mute.
 //!
-//! Double tap on a clip: deletes it (not with the eraser, which already does). Double tap
-//! on a pattern of the list: its menu (delete the pattern and its clips).
+//! Double tap on a clip: deletes it (not with the eraser, which already does).
 //!
-//! The pattern list shows one pattern per row and scrolls (drag, wheel, two fingers).
+//! The pattern list shows one pattern per row and scrolls (drag, wheel, two fingers). A tap
+//! selects a pattern, a long press (right-click) opens its menu (see [`crate::pattern_menu`]).
 //!
 //! Touch: two fingers scroll and zoom. With one finger, the strip under the lanes scrolls
 //! horizontally, and a drag on the mute column or on the scroll bar right of the lanes
@@ -12,6 +12,7 @@
 //! there is room for new clips.
 
 use crate::icons::Icon;
+use crate::pattern_menu::{self, pattern_rgb};
 use crate::piano::{EDGE_PX, EDGE_TOUCH_IN, EDGE_TOUCH_OUT, Tool};
 use crate::skin::{self, Kind};
 use crate::theme::*;
@@ -78,8 +79,6 @@ pub struct PlaylistState {
     /// Draw / select / erase / brush. Brush: press on a clip then drag = end-to-end copies;
     /// on empty space = clips of the selected pattern.
     pub tool: Tool,
-    /// Pattern whose menu is open (double tap on its row).
-    menu: Option<PatternId>,
     /// Vertical scroll of the pattern list, and the pattern it last brought into view.
     list_scroll: f32,
     revealed: Option<PatternId>,
@@ -88,6 +87,12 @@ pub struct PlaylistState {
     fresh: Option<(usize, f64)>,
     /// Selection when the current press began: restored if it becomes a two-finger gesture.
     press_sel: Option<Vec<usize>>,
+}
+
+impl PlaylistState {
+    pub(crate) fn deselect(&mut self) {
+        self.selected.clear();
+    }
 }
 
 impl Default for PlaylistState {
@@ -103,7 +108,6 @@ impl Default for PlaylistState {
             seen: None,
             clipboard: Vec::new(),
             tool: Tool::Draw,
-            menu: None,
             list_scroll: 0.0,
             revealed: None,
             fresh: None,
@@ -223,10 +227,11 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         .iter()
         .map(|p| (p.id, (p.name.clone(), p.length.max(1), p.notes.values().flatten().copied().collect())))
         .collect();
+    let colors: HashMap<PatternId, Color32> = project.patterns.iter().map(|p| (p.id, pattern_rgb(p))).collect();
+    let color_of = |id: PatternId| colors.get(&id).copied().unwrap_or_else(|| id_color(id.0));
 
     // --- Pattern list ---
-    let menu_id = ui.make_persistent_id("timeline_tap_menu");
-    let tiles = pattern_list(st, ui, palette, project);
+    pattern_list(st, ui, palette, project);
 
     // --- Arrangement ---
     let p = ui.painter().clone();
@@ -638,7 +643,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             continue;
         }
         // Clips on a muted track are dimmed.
-        let color = if is_muted(c.track) { mix(pal().inner, id_color(c.pattern.0), 0.4) } else { id_color(c.pattern.0) };
+        let color = if is_muted(c.track) { mix(pal().inner, color_of(c.pattern), 0.4) } else { color_of(c.pattern) };
         let Some((name, plen, notes)) = pat_info.get(&c.pattern) else { continue };
         let sel = is_sel(i);
         gp.rect_filled(r, 5.0, mix(pal().inner, color, if sel { 0.32 } else { 0.18 }));
@@ -724,31 +729,18 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         p.rect_stroke(thumb, 4.0, Stroke::new(1.0_f32, if held { pal().orange } else { pal().thumb_edge }));
     }
     p.rect_stroke(arr, 8.0, Stroke::new(1.0_f32, pal().edge));
-    overview(ui, strip, &mut st.playlist, &project.arrangement.clips, tracks, reach, song_end, grid.width());
+    overview(ui, strip, &mut st.playlist, &project.arrangement.clips, &color_of, tracks, reach, song_end, grid.width());
 
     if let Some(tr) = toggle_mute {
         seq_edit::toggle_track_mute(project, tr);
     }
-    let anchor = st.playlist.menu.and_then(|id| tiles.iter().find(|(t, _)| *t == id).map(|(_, r)| *r));
-    match anchor {
-        Some(r) if ui.memory(|m| m.is_popup_open(menu_id)) => tap_menu(st, ui, menu_id, r, project),
-        Some(_) => st.playlist.menu = None,
-        None => {
-            // Pattern gone (undo, deletion elsewhere): the menu goes too.
-            if st.playlist.menu.take().is_some() && ui.memory(|m| m.is_popup_open(menu_id)) {
-                ui.memory_mut(|m| m.close_popup());
-            }
-        }
-    }
-
     st.actions.extend(actions);
 }
 
 /// Pattern list left of the lanes: one pattern per row, scrolled by a drag (one finger or
 /// the mouse), the wheel or two fingers; "+ New pattern" stays below it. A tap selects the
-/// pattern (then a tap in the lanes places it). Returns the rows on screen.
-fn pattern_list(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) -> Vec<(PatternId, Rect)> {
-    let menu_id = ui.make_persistent_id("timeline_tap_menu");
+/// pattern (then a tap in the lanes places it), a long press or a right-click opens its menu.
+fn pattern_list(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) {
     let p = ui.painter().clone();
     skin::caption(&p, rect.left_top() + vec2(0.0, 7.0), Align2::LEFT_CENTER, "PATTERNS", pal().text_dimmer);
     let add = Rect::from_min_max(pos2(rect.left(), (rect.bottom() - PAT_ROW_H).max(rect.top() + 18.0)), rect.max);
@@ -778,17 +770,19 @@ fn pattern_list(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) 
     let scroll = ps.list_scroll;
     let under = resp.interact_pointer_pos().or(resp.hover_pos()).and_then(|pos| list_row(pos.y - list.top() + scroll, n));
     let resp = resp.on_hover_text(tr!(
-        "Sélectionner, puis cliquer dans la timeline pour le poser · double-clic : supprimer…",
-        "Select, then click in the timeline to place it · double-click: delete…"
+        "Sélectionner, puis cliquer dans la timeline pour le poser · clic droit / appui long : menu",
+        "Select, then click in the timeline to place it · right-click / long press: menu"
     ));
+    let row_rect = |i: usize| Rect::from_min_size(pos2(list.left(), list.top() + i as f32 * step - scroll), vec2(list.width(), PAT_ROW_H));
     if let Some(i) = under {
+        let id = project.patterns[i].id;
         if resp.clicked() {
-            st.pattern = project.patterns[i].id;
-            st.playlist.revealed = Some(st.pattern);
+            st.pattern = id;
+            st.playlist.revealed = Some(id);
         }
-        if resp.double_clicked() {
-            st.playlist.menu = Some(project.patterns[i].id);
-            ui.memory_mut(|m| m.open_popup(menu_id));
+        // Long press (touch) or right-click: the menu, under the row.
+        if resp.secondary_clicked() {
+            pattern_menu::open(st, ui.ctx(), id, row_rect(i).intersect(list));
         }
     }
 
@@ -796,7 +790,6 @@ fn pattern_list(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) 
     let overflow = max_scroll > 0.0;
     let row_w = if overflow { rect.width() - 10.0 } else { rect.width() };
     let lp = p.with_clip_rect(list.intersect(p.clip_rect()));
-    let mut rows = Vec::new();
     let first = (scroll / step) as usize;
     for (i, pat) in project.patterns.iter().enumerate().skip(first) {
         let r = Rect::from_min_size(pos2(list.left(), list.top() + i as f32 * step - scroll), vec2(row_w, PAT_ROW_H));
@@ -804,12 +797,11 @@ fn pattern_list(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) 
             break;
         }
         let sel = st.pattern == pat.id;
-        let hovered = under == Some(i) && resp.hovered() && !resp.dragged();
+        let hovered = (under == Some(i) && resp.hovered() && !resp.dragged()) || pattern_menu::is_open_for(st, ui.ctx(), pat.id);
         lp.rect_filled(r, 7.0, if sel { pal().tile_sel } else if hovered { pal().ruler } else { pal().inner });
         lp.rect_stroke(r, 7.0, if sel { Stroke::new(2.0_f32, pal().orange) } else { Stroke::new(1.0_f32, pal().edge) });
-        lp.rect_filled(Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(12.0, 12.0)), 3.0, id_color(pat.id.0));
+        lp.rect_filled(Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(12.0, 12.0)), 3.0, pattern_rgb(pat));
         lp.with_clip_rect(r.shrink(2.0).intersect(list)).text(pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &pat.name, body(15.0), pal().text);
-        rows.push((pat.id, r.intersect(list)));
     }
     if let Some((off, len)) = overflow.then(|| thumb_span(list.height(), list.height(), content, scroll, THUMB_MIN)) {
         let thumb = Rect::from_min_size(pos2(list.right() - 5.0, list.top() + off), vec2(4.0, len));
@@ -820,7 +812,6 @@ fn pattern_list(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) 
     if skin::text_button(&mut au, add.size(), Kind::Ghost, tr!("+ Nouveau pattern", "+ New pattern"), body(14.0)).clicked() {
         st.pattern = seq_edit::new_pattern(project);
     }
-    rows
 }
 
 /// Row of the pattern list at `y` points from the top of its content (scroll included),
@@ -829,64 +820,6 @@ fn list_row(y: f32, n: usize) -> Option<usize> {
     let step = PAT_ROW_H + PAT_ROW_GAP;
     let k = y / step;
     (y >= 0.0 && y - k.floor() * step <= PAT_ROW_H).then_some(k as usize).filter(|&i| i < n)
-}
-
-/// Double-tap menu of a palette pattern. Deleting a pattern goes through a menu, never
-/// straight from the double tap: a stray double touch must not remove all its clips.
-fn tap_menu(st: &mut SeqUi, ui: &mut Ui, id: egui::Id, anchor: Rect, project: &mut Project) {
-    let Some(pat) = st.playlist.menu else { return };
-    let Some(name) = project.pattern(pat).map(|p| p.name.clone()) else { return };
-    let uses = project.arrangement.clips.iter().filter(|c| c.pattern == pat).count();
-    let last = project.patterns.len() <= 1;
-    // The last pattern stays: its clips can still go.
-    let pattern_item = match (last, uses) {
-        (false, 0) => Some(tr!("Supprimer le pattern", "Delete pattern").to_string()),
-        (false, 1) => Some(tr!("Supprimer le pattern et son clip", "Delete pattern and its clip").to_string()),
-        (false, n) => Some(trf!("Supprimer le pattern et ses {} clips", "Delete pattern and its {} clips", n)),
-        (true, 0) => None,
-        (true, 1) => Some(tr!("Supprimer son clip", "Delete its clip").to_string()),
-        (true, n) => Some(trf!("Supprimer ses {} clips", "Delete its {} clips", n)),
-    };
-    let (anchor, side) = menu_anchor(anchor, menu_height(1), ui.ctx().screen_rect());
-    let anchor = ui.interact(anchor, id.with("anchor"), Sense::hover());
-    let mut done = false;
-    egui::popup_above_or_below_widget(ui, id, &anchor, side, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
-        ui.set_min_width(260.0);
-        skin::menu_caption(ui, &name.to_uppercase());
-        match &pattern_item {
-            Some(label) if skin::menu_item(ui, label, pal().danger, false).clicked() => {
-                if last {
-                    seq_edit::delete_pattern_clips(project, pat);
-                } else {
-                    seq_edit::delete_pattern(project, pat);
-                }
-                done = true;
-            }
-            Some(_) => {}
-            None => skin::menu_disabled(ui, tr!("Dernier pattern, impossible à supprimer", "Last pattern, can't be deleted")),
-        }
-    });
-    if done {
-        st.playlist.menu = None;
-        st.playlist.selected.clear();
-        ui.memory_mut(|m| m.close_popup());
-    }
-}
-
-/// Height of the tap menu: caption, `rows` items of 40 points, frame margins.
-fn menu_height(rows: usize) -> f32 {
-    28.0 + rows as f32 * 44.0 + 20.0
-}
-
-/// Where the tap menu opens: below the anchor if it fits on screen, otherwise on the side
-/// with the most room (egui then keeps it inside the screen). The anchor is narrowed so a
-/// long clip does not stretch the menu across the timeline.
-fn menu_anchor(anchor: Rect, menu_h: f32, screen: Rect) -> (Rect, egui::AboveOrBelow) {
-    let anchor = Rect::from_min_size(anchor.min, vec2(anchor.width().min(260.0), anchor.height()));
-    let below = screen.bottom() - anchor.bottom();
-    let above = anchor.top() - screen.top();
-    let side = if below >= menu_h || below >= above { egui::AboveOrBelow::Below } else { egui::AboveOrBelow::Above };
-    (anchor, side)
 }
 
 /// How far the timeline reaches (ticks): the end of the song (at least `MIN_BARS` bars) plus
@@ -898,7 +831,7 @@ fn reach(song_end: Tick, view: Tick, bar: Tick) -> Tick {
 /// Overview strip under the lanes: the whole reach with the song and its clips, and the
 /// part in view. Tap = jump there, drag = scroll (one finger, while the lanes edit).
 #[allow(clippy::too_many_arguments)]
-fn overview(ui: &mut Ui, rect: Rect, ps: &mut PlaylistState, clips: &[Clip], tracks: u16, reach: Tick, song_end: Tick, view_w: f32) {
+fn overview(ui: &mut Ui, rect: Rect, ps: &mut PlaylistState, clips: &[Clip], color_of: &dyn Fn(PatternId) -> Color32, tracks: u16, reach: Tick, song_end: Tick, view_w: f32) {
     let inner = rect.shrink2(vec2(0.0, 3.0));
     // Rows overlap when there are many tracks: a clip stays at least 2 points high.
     let row = inner.height() / tracks.max(1) as f32;
@@ -906,7 +839,7 @@ fn overview(ui: &mut Ui, rect: Rect, ps: &mut PlaylistState, clips: &[Clip], tra
         for c in clips {
             let y = inner.top() + c.track as f32 * row;
             let r = Rect::from_min_max(pos2(x_of(c.start as f32), y), pos2(x_of((c.start + c.len) as f32).max(x_of(c.start as f32) + 1.5), y + row.max(2.0)));
-            p.rect_filled(r.intersect(rect), 0.0, with_alpha(id_color(c.pattern.0), 190));
+            p.rect_filled(r.intersect(rect), 0.0, with_alpha(color_of(c.pattern), 190));
         }
     };
     widgets::overview_strip(ui, rect, "timeline_hscroll", reach, song_end, &mut ps.scroll_x, ps.zoom, view_w, ps.max_x, marks);
@@ -919,21 +852,6 @@ fn fmt_bar(t: Tick, bar: Tick) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tap_menu_stays_on_a_phone_screen() {
-        // 2400 × 1080 px landscape phone at 2.625 px per point.
-        let screen = Rect::from_min_size(Pos2::ZERO, vec2(914.0, 411.0));
-        let h = menu_height(1);
-        let side = |top: f32| menu_anchor(Rect::from_min_size(pos2(300.0, top), vec2(900.0, 60.0)), h, screen);
-        // Room below: below. Clip near the bottom: above, and fits.
-        assert!(matches!(side(80.0).1, egui::AboveOrBelow::Below));
-        let (r, s) = side(300.0);
-        assert!(matches!(s, egui::AboveOrBelow::Above));
-        assert!(r.top() - h >= screen.top());
-        // A long clip does not stretch the menu.
-        assert_eq!(r.width(), 260.0);
-    }
 
     #[test]
     fn pattern_list_rows_under_the_finger() {
