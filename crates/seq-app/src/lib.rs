@@ -91,6 +91,8 @@ struct App {
     levels: HashMap<ChannelId, (f32, f32)>,
     master: (f32, f32),
     recorder: Recorder,
+    /// Song mode: a note of the current take fell outside every clip (said once per take).
+    take_dropped: bool,
     confirm: Option<Pending>,
     title: String,
     files: Files,
@@ -150,6 +152,7 @@ impl App {
             levels: HashMap::new(),
             master: (0.0, 0.0),
             recorder: Recorder::default(),
+            take_dropped: false,
             confirm: None,
             title: String::new(),
             files,
@@ -450,20 +453,30 @@ impl App {
         }
     }
 
-    /// Note recorded from MIDI in (Pattern mode only).
+    /// Note recorded from MIDI in: into the current pattern (Pattern mode), or into the clip
+    /// under the playhead (Song mode, `tick` = song position).
     fn on_recorded(&mut self, channel: ChannelId, key: u8, vel: u8, tick: f64, time: f64, on: bool) {
-        if self.ui.song_mode || !self.ui.recording {
+        if !self.ui.recording {
             return;
         }
         let Some(rec) = self.recorder.event(channel, key, vel, tick, time, on) else { return };
-        let note = rec.to_note(self.ui.record_grid());
-        seq_edit::add_recorded_note(&mut self.project, self.ui.pattern, rec.channel, note);
+        let grid = self.ui.record_grid();
+        if !self.ui.song_mode {
+            seq_edit::add_recorded_note(&mut self.project, self.ui.pattern, rec.channel, rec.to_note(grid));
+        } else if !seq_edit::add_song_recorded_note(&mut self.project, self.ui.pattern, &rec, grid) && !self.take_dropped {
+            self.take_dropped = true;
+            self.ui.status = tr!(
+                "Enregistrement : aucun clip sous la tête de lecture, notes ignorées",
+                "Recording: no clip under the playhead, notes dropped"
+            )
+            .into();
+        }
     }
 
-    /// Recording into the current pattern (Pattern mode): the engine does not loop, and the
-    /// whole take is one undo step.
+    /// Recording take: the whole take is one undo step. In Pattern mode the engine does not
+    /// loop (the pattern grows).
     fn recording_take(&self, playing: bool) -> bool {
-        playing && self.ui.recording && !self.ui.song_mode
+        playing && self.ui.recording
     }
 
     // ------------------------------------------------------------------
@@ -876,6 +889,9 @@ impl eframe::App for App {
             || ctx.wants_keyboard_input()
             || self.recording_take(running);
         self.history.commit_if_changed(&self.project, gesture);
+        if !self.recording_take(running) {
+            self.take_dropped = false;
+        }
         self.sync_engine();
         self.poll_samples();
 

@@ -24,8 +24,8 @@
 //! - Clock enabled on an output while playing → SPP + Continue on that output; disabled
 //!   → Stop. No clock while stopped.
 //!
-//! Recording (Pattern mode): playback does not loop, it goes on past the end of the
-//! pattern (the app grows the pattern). With the count-in on, Play from stop first clicks
+//! Recording: in Pattern mode playback does not loop, it goes on past the end of the
+//! pattern (the app grows the pattern); in Song mode it loops as usual. With the count-in on, Play from stop first clicks
 //! one bar while the transport stays put; playback, recording and the MIDI clock Start
 //! begin right after it.
 
@@ -88,7 +88,8 @@ pub enum EngineEvent {
     Levels { channel: ChannelId, peak_l: f32, peak_r: f32 },
     /// Master output peaks (after soft clip).
     Master { peak_l: f32, peak_r: f32 },
-    /// Note played via MIDI in while recording. `tick` = position within the region;
+    /// Note played via MIDI in while recording. `tick` = position within the region (the
+    /// song position in Song mode);
     /// `time` = monotonic time in ticks (does not wrap at the loop end), for note lengths.
     Recorded { channel: ChannelId, key: u8, vel: u8, tick: f64, time: f64, on: bool },
 }
@@ -2258,6 +2259,32 @@ mod tests {
         tx.push(midi(true, 62, 100)).unwrap();
         run(&mut e, 500, &[500]);
         assert_eq!(recorded(&mut h), vec![(ch, 62, 100, 0.0, true)]);
+    }
+
+    #[test]
+    fn song_mode_records_song_positions_after_count_in() {
+        // One-bar pattern (3840 ticks = 96000 frames) in a 2-bar clip from bar 2: 3-bar song.
+        let (mut p, ch, pat) = project_with_steps(&[], 16);
+        p.arrangement.clips.push(Clip { pattern: pat, track: 0, start: 3840, len: 2 * 3840 });
+        let (mut e, mut h, _log, mut tx) = midi_in_engine(&p, ch);
+        e.handle_cmd(EngineCmd::SetMode(PlayMode::Song));
+        e.handle_cmd(EngineCmd::SetLiveChannel(Some(ch)));
+        e.handle_cmd(EngineCmd::SetRecording(true));
+        e.handle_cmd(EngineCmd::SetCountIn(true));
+        e.handle_cmd(EngineCmd::Play);
+        run(&mut e, 96_000, &[500]);
+        assert!(e.shared.playing());
+        assert_eq!(e.shared.pattern(), None);
+        // Bar 2 and a quarter: the song position, not wrapped into the pattern.
+        run(&mut e, 120_000, &[500]);
+        tx.push(midi(true, 60, 100)).unwrap();
+        run(&mut e, 500, &[500]);
+        assert_eq!(recorded(&mut h), vec![(ch, 60, 100, 4800.0, true)]);
+        // The song loops while recording: a quarter into the second time round.
+        run(&mut e, 3 * 96_000 - 120_500 + 24_000, &[500]);
+        tx.push(midi(false, 60, 0)).unwrap();
+        run(&mut e, 500, &[500]);
+        assert_eq!(recorded(&mut h), vec![(ch, 60, 0, 960.0, false)]);
     }
 
     #[test]

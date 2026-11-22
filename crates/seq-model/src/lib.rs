@@ -358,6 +358,28 @@ impl Arrangement {
     pub fn audible_clips(&self) -> impl Iterator<Item = &Clip> {
         self.clips.iter().filter(|c| !self.is_muted(c.track))
     }
+
+    /// Position inside `pattern` (length `pat_len`) for the song position `pos`: the clip of
+    /// that pattern heard there, on any track, gives the offset (see [`Clip::pattern_pos`]).
+    /// If several clips of the pattern overlap, the one that started last wins. None when
+    /// none is playing.
+    pub fn pattern_pos(&self, pattern: PatternId, pat_len: Tick, pos: f64) -> Option<f64> {
+        self.audible_clips()
+            .filter(|c| c.pattern == pattern)
+            .filter_map(|c| Some((c.start, c.pattern_pos(pat_len, pos)?)))
+            .max_by_key(|&(start, _)| start)
+            .map(|(_, p)| p)
+    }
+}
+
+impl Clip {
+    /// Position inside the clip's pattern (length `pat_len`) at the song position `pos`, if
+    /// the clip plays there (its end is exclusive, an empty clip never plays). The pattern
+    /// loops when the clip is longer than it, as in the engine.
+    pub fn pattern_pos(&self, pat_len: Tick, pos: f64) -> Option<f64> {
+        let (start, end) = (self.start as f64, (self.start + self.len) as f64);
+        (self.len > 0 && pos >= start && pos < end).then(|| (pos - start) % pat_len.max(1) as f64)
+    }
 }
 
 /// A clip plays its pattern from the start; if `len` exceeds the pattern length,
@@ -637,5 +659,50 @@ mod tests {
         assert_eq!(key_name(60), "C4");
         assert_eq!(key_name(69), "A4");
         assert!(is_black_key(61));
+    }
+
+    fn clip(pattern: u32, track: u16, start: Tick, len: Tick) -> Clip {
+        Clip { pattern: PatternId(pattern), track, start, len }
+    }
+
+    #[test]
+    fn playhead_inside_clip() {
+        let arr = Arrangement { tracks: 4, clips: vec![clip(1, 0, 1000, 500), clip(2, 2, 0, 4000)], muted: Vec::new() };
+        assert_eq!(arr.pattern_pos(PatternId(1), 500, 1200.0), Some(200.0));
+        assert_eq!(arr.pattern_pos(PatternId(2), 4000, 1200.0), Some(1200.0));
+    }
+
+    #[test]
+    fn playhead_none_outside_clips() {
+        let arr = Arrangement { tracks: 4, clips: vec![clip(1, 0, 1000, 500), clip(1, 1, 3000, 0)], muted: Vec::new() };
+        assert_eq!(arr.pattern_pos(PatternId(1), 500, 999.0), None);
+        // The clip end is exclusive.
+        assert_eq!(arr.pattern_pos(PatternId(1), 500, 1500.0), None);
+        // Empty clips are ignored, like in the engine.
+        assert_eq!(arr.pattern_pos(PatternId(1), 500, 3000.0), None);
+        // Another pattern.
+        assert_eq!(arr.pattern_pos(PatternId(3), 500, 1200.0), None);
+    }
+
+    #[test]
+    fn playhead_loops_in_long_clip() {
+        let arr = Arrangement { tracks: 1, clips: vec![clip(1, 0, 1000, 2500)], muted: Vec::new() };
+        assert_eq!(arr.pattern_pos(PatternId(1), 1000, 1000.0), Some(0.0));
+        assert_eq!(arr.pattern_pos(PatternId(1), 1000, 2250.0), Some(250.0));
+        assert_eq!(arr.pattern_pos(PatternId(1), 1000, 3400.0), Some(400.0));
+        // A clip shorter than the pattern truncates it.
+        let arr = Arrangement { tracks: 1, clips: vec![clip(1, 0, 0, 300)], muted: Vec::new() };
+        assert_eq!(arr.pattern_pos(PatternId(1), 1000, 299.0), Some(299.0));
+        assert_eq!(arr.pattern_pos(PatternId(1), 1000, 300.0), None);
+    }
+
+    #[test]
+    fn playhead_latest_overlapping_clip_wins() {
+        let mut arr = Arrangement { tracks: 2, clips: vec![clip(1, 1, 500, 2000), clip(1, 0, 0, 2000)], muted: Vec::new() };
+        assert_eq!(arr.pattern_pos(PatternId(1), 4000, 700.0), Some(200.0));
+        assert_eq!(arr.pattern_pos(PatternId(1), 4000, 300.0), Some(300.0));
+        // A muted track doesn't play, so the other clip gives the position.
+        arr.set_muted(1, true);
+        assert_eq!(arr.pattern_pos(PatternId(1), 4000, 700.0), Some(700.0));
     }
 }

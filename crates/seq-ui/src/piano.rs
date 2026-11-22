@@ -475,7 +475,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     ps.zoom = ps.zoom.max(min_zoom(base_len, bar, grid.width()));
     ps.scroll_y = ps.scroll_y.clamp(0.0, (128.0 * ps.key_h - grid.height()).max(0.0));
     // Playhead inside the edited pattern (Song mode: only while one of its clips plays).
-    let playhead = info.playing.then(|| if st.song_mode { pattern_playhead(&project.arrangement, pat_id, pat_len, info.playhead) } else { Some(info.playhead) }).flatten();
+    let playhead = info.playing.then(|| if st.song_mode { project.arrangement.pattern_pos(pat_id, pat_len, info.playhead) } else { Some(info.playhead) }).flatten();
     // Follows the playhead bar by bar, unless the user just scrolled or is editing.
     if let Some(ph) = playhead
         && ps.drag.is_none()
@@ -1275,18 +1275,6 @@ fn len_text(len: Tick) -> String {
         .unwrap_or_else(|| trf!("{} ticks", "{} ticks", len))
 }
 
-/// Playhead position inside `pattern` (length `pat_len`) for the song position `pos`:
-/// the clip of that pattern under the playhead, on any track, gives the offset, and the
-/// pattern loops when the clip is longer than it (as in the engine). If several clips of
-/// the pattern overlap, the one that started last wins. None when none is playing.
-pub(crate) fn pattern_playhead(arr: &Arrangement, pattern: PatternId, pat_len: Tick, pos: f64) -> Option<f64> {
-    let plen = pat_len.max(1) as f64;
-    arr.audible_clips()
-        .filter(|c| c.pattern == pattern && c.len > 0 && pos >= c.start as f64 && pos < (c.start + c.len) as f64)
-        .max_by_key(|c| c.start)
-        .map(|c| (pos - c.start as f64) % plen)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1304,51 +1292,6 @@ mod tests {
         assert_eq!(reach, 48 * bar);
         let max = widgets::scroll_limit(reach, zoom, 800.0, None);
         assert!((max - 16.0 * bar as f32 * zoom).abs() < 0.01);
-    }
-
-    fn clip(pattern: u32, track: u16, start: Tick, len: Tick) -> Clip {
-        Clip { pattern: PatternId(pattern), track, start, len }
-    }
-
-    #[test]
-    fn playhead_inside_clip() {
-        let arr = Arrangement { tracks: 4, clips: vec![clip(1, 0, 1000, 500), clip(2, 2, 0, 4000)], muted: Vec::new() };
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 1200.0), Some(200.0));
-        assert_eq!(pattern_playhead(&arr, PatternId(2), 4000, 1200.0), Some(1200.0));
-    }
-
-    #[test]
-    fn playhead_none_outside_clips() {
-        let arr = Arrangement { tracks: 4, clips: vec![clip(1, 0, 1000, 500), clip(1, 1, 3000, 0)], muted: Vec::new() };
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 999.0), None);
-        // The clip end is exclusive.
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 1500.0), None);
-        // Empty clips are ignored, like in the engine.
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 500, 3000.0), None);
-        // Another pattern.
-        assert_eq!(pattern_playhead(&arr, PatternId(3), 500, 1200.0), None);
-    }
-
-    #[test]
-    fn playhead_loops_in_long_clip() {
-        let arr = Arrangement { tracks: 1, clips: vec![clip(1, 0, 1000, 2500)], muted: Vec::new() };
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 1000.0), Some(0.0));
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 2250.0), Some(250.0));
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 3400.0), Some(400.0));
-        // A clip shorter than the pattern truncates it.
-        let arr = Arrangement { tracks: 1, clips: vec![clip(1, 0, 0, 300)], muted: Vec::new() };
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 299.0), Some(299.0));
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 1000, 300.0), None);
-    }
-
-    #[test]
-    fn playhead_latest_overlapping_clip_wins() {
-        let mut arr = Arrangement { tracks: 2, clips: vec![clip(1, 1, 500, 2000), clip(1, 0, 0, 2000)], muted: Vec::new() };
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 700.0), Some(200.0));
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 300.0), Some(300.0));
-        // A muted track doesn't play, so the other clip gives the position.
-        arr.set_muted(1, true);
-        assert_eq!(pattern_playhead(&arr, PatternId(1), 4000, 700.0), Some(700.0));
     }
 }
 

@@ -1,10 +1,16 @@
 //! Live recording: MIDI in note-on/off events → pattern notes.
 //!
-//! While recording, the engine does not loop the pattern: notes played past its end land
-//! there and the pattern grows by whole bars (like FL Studio). The app does not commit an
-//! undo step during the take, so the notes and the growth undo together.
+//! Pattern mode: while recording, the engine does not loop the pattern: notes played past
+//! its end land there and the pattern grows by whole bars (like FL Studio).
+//!
+//! Song mode: notes go into the pattern of the clip under the playhead (see
+//! [`song_record_target`]), wrapped into it as the clip plays it; patterns do not grow.
+//!
+//! The app does not commit an undo step during the take, so the notes and the growth undo
+//! together.
 
 use seq_model::*;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 /// Pairs each recorded note-on with its note-off (per channel and key).
@@ -14,9 +20,9 @@ pub struct Recorder {
     pending: HashMap<(ChannelId, u8), (f64, f64, u8)>,
 }
 
-/// A note-on matched with its note-off. `start` is the position in the pattern, as sent
-/// by the engine (past the end of the pattern if it was played there); `len` is how long
-/// the key was held, in ticks.
+/// A note-on matched with its note-off. `start` is the position sent by the engine: in the
+/// pattern (past its end if it was played there) in Pattern mode, in the song in Song mode;
+/// `len` is how long the key was held, in ticks.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecordedNote {
     pub channel: ChannelId,
@@ -67,6 +73,42 @@ pub fn add_recorded_note(project: &mut Project, pattern: PatternId, channel: Cha
     let Some(pat) = project.pattern_mut(pattern) else { return };
     pat.length = crate::length_for_end(pat.length, note.start + note.len, bar);
     pat.notes.entry(channel).or_default().push(note);
+}
+
+/// Song mode: the pattern recorded into at the song position `pos`, and the position inside
+/// it. The clip of `selected` (the edited pattern) wins if one plays there; otherwise the
+/// topmost clip under the playhead (lowest track; on that track, the one that started last).
+/// Clips on muted tracks are not heard, so they are not recorded into. None when no clip
+/// plays there.
+pub fn song_record_target(project: &Project, selected: PatternId, pos: f64) -> Option<(PatternId, f64)> {
+    let arr = &project.arrangement;
+    let len = |id| project.pattern(id).map(|p| p.length);
+    if let Some(l) = len(selected)
+        && let Some(p) = arr.pattern_pos(selected, l, pos)
+    {
+        return Some((selected, p));
+    }
+    arr.audible_clips()
+        .filter_map(|c| Some((c, c.pattern_pos(len(c.pattern)?, pos)?)))
+        .min_by_key(|(c, _)| (c.track, Reverse(c.start)))
+        .map(|(c, p)| (c.pattern, p))
+}
+
+/// Song mode: adds a note recorded at the song position `rec.start` to the pattern of the
+/// clip playing there (see [`song_record_target`]), quantized to `grid` (see
+/// [`RecordedNote::to_note`]). The pattern does not grow: the note wraps into it as the clip
+/// plays it, and ends at the end of the pattern at the latest (where its playback stops in
+/// Pattern mode). Returns `false` when no clip plays there: the note is dropped.
+pub fn add_song_recorded_note(project: &mut Project, selected: PatternId, rec: &RecordedNote, grid: Tick) -> bool {
+    let Some((pattern, pos)) = song_record_target(project, selected, rec.start) else { return false };
+    let Some(pat) = project.pattern_mut(pattern) else { return false };
+    let plen = pat.length.max(1);
+    let mut note = RecordedNote { start: pos, ..*rec }.to_note(grid);
+    // Quantized up to the end of the pattern: the start of its next repetition.
+    note.start %= plen;
+    note.len = note.len.min(plen - note.start);
+    pat.notes.entry(rec.channel).or_default().push(note);
+    true
 }
 
 /// Recording went on past the end of the pattern, up to position `pos` (ticks): the
@@ -305,5 +347,124 @@ mod tests {
         let pt = p.pattern(pat).unwrap();
         assert_eq!(pt.length, 4 * BAR);
         assert!(pt.notes.get(&ch).is_none_or(|n| n.is_empty()));
+    }
+
+    /// Song mode: 4-bar song with an empty one-bar pattern `a` and a two-bar pattern `b`.
+    fn song() -> (Project, PatternId, PatternId, ChannelId) {
+        let mut p = Project::empty();
+        let ch = p.add_channel("c", ChannelKind::Synth(SynthParams::default())).unwrap();
+        let a = p.patterns[0].id;
+        p.pattern_mut(a).unwrap().length = BAR;
+        let b = p.add_pattern("b", 2 * BAR);
+        p.arrangement.clips.clear();
+        (p, a, b, ch)
+    }
+
+    fn clip(pattern: PatternId, track: u16, start: Tick, len: Tick) -> Clip {
+        Clip { pattern, track, start, len }
+    }
+
+    /// Note played at song position `start` for `held` ticks.
+    fn played(ch: ChannelId, start: f64, held: f64) -> RecordedNote {
+        RecordedNote { channel: ch, key: 60, vel: 100, start, len: held }
+    }
+
+    fn notes(p: &Project, pat: PatternId, ch: ChannelId) -> Vec<Note> {
+        p.pattern(pat).unwrap().notes.get(&ch).cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn song_records_into_empty_pattern_clip() {
+        let (mut p, a, b, ch) = song();
+        // `a` in bar 2 only, the edited pattern being `b` (not in the song).
+        p.arrangement.clips.push(clip(a, 0, BAR, BAR));
+        assert!(add_song_recorded_note(&mut p, b, &played(ch, (BAR + 480) as f64, 960.0), OFF));
+        assert_eq!(notes(&p, a, ch), vec![note(480, 960)]);
+        assert!(notes(&p, b, ch).is_empty());
+        // The pattern does not grow.
+        assert_eq!(p.pattern(a).unwrap().length, BAR);
+    }
+
+    #[test]
+    fn song_records_at_the_offset_of_the_clip() {
+        let (mut p, a, _, ch) = song();
+        p.arrangement.clips.push(clip(a, 1, 3 * BAR + 100, BAR));
+        assert!(add_song_recorded_note(&mut p, a, &played(ch, (3 * BAR + 100 + STEP) as f64, STEP as f64), OFF));
+        assert_eq!(notes(&p, a, ch), vec![note(STEP, STEP)]);
+    }
+
+    #[test]
+    fn song_wraps_notes_into_a_looping_clip() {
+        let (mut p, a, _, ch) = song();
+        // A one-bar pattern looping over 3 bars.
+        p.arrangement.clips.push(clip(a, 0, 0, 3 * BAR));
+        assert!(add_song_recorded_note(&mut p, a, &played(ch, (2 * BAR + 720) as f64, STEP as f64), OFF));
+        assert_eq!(notes(&p, a, ch), vec![note(720, STEP)]);
+        // Held across the loop point: ends at the end of the pattern.
+        assert!(add_song_recorded_note(&mut p, a, &played(ch, (2 * BAR - STEP) as f64, (4 * STEP) as f64), OFF));
+        assert_eq!(notes(&p, a, ch)[1], note(BAR - STEP, STEP));
+        // Quantized up to the loop point: the start of the pattern.
+        assert!(add_song_recorded_note(&mut p, a, &played(ch, (BAR - 10) as f64, 200.0), STEP));
+        assert_eq!(notes(&p, a, ch)[2], note(0, STEP));
+        assert_eq!(p.pattern(a).unwrap().length, BAR);
+    }
+
+    #[test]
+    fn song_quantizes_inside_the_pattern() {
+        let (mut p, a, _, ch) = song();
+        // Clip off the grid: the grid is the pattern's, as in the piano roll.
+        p.arrangement.clips.push(clip(a, 0, 50, BAR));
+        assert!(add_song_recorded_note(&mut p, a, &played(ch, (50 + STEP + 100) as f64, 300.0), STEP));
+        assert_eq!(notes(&p, a, ch), vec![note(STEP, STEP)]);
+    }
+
+    #[test]
+    fn song_without_clip_drops_the_note() {
+        let (mut p, a, b, ch) = song();
+        p.arrangement.clips.push(clip(a, 0, 0, BAR));
+        // Past the clip end (exclusive), in an empty clip, on a muted track.
+        assert!(!add_song_recorded_note(&mut p, a, &played(ch, BAR as f64, 100.0), OFF));
+        p.arrangement.clips.push(clip(b, 1, 2 * BAR, 0));
+        assert!(!add_song_recorded_note(&mut p, a, &played(ch, (2 * BAR) as f64, 100.0), OFF));
+        p.arrangement.clips.push(clip(b, 2, 3 * BAR, BAR));
+        p.arrangement.set_muted(2, true);
+        assert!(!add_song_recorded_note(&mut p, a, &played(ch, (3 * BAR + 10) as f64, 100.0), OFF));
+        assert!(!add_song_recorded_note(&mut p, a, &played(ch, f64::NAN, 100.0), OFF));
+        assert!(notes(&p, a, ch).is_empty() && notes(&p, b, ch).is_empty());
+    }
+
+    #[test]
+    fn song_target_prefers_the_edited_pattern_then_the_top_track() {
+        let (mut p, a, b, _) = song();
+        let c = p.add_pattern("c", BAR);
+        p.arrangement.tracks = 4;
+        p.arrangement.clips = vec![clip(b, 2, 0, 2 * BAR), clip(a, 1, BAR, BAR), clip(b, 3, 0, BAR)];
+        // The edited pattern plays there: it wins, even on a lower track.
+        assert_eq!(song_record_target(&p, b, (BAR + 10) as f64), Some((b, (BAR + 10) as f64)));
+        // It does not (or not there): the topmost clip.
+        assert_eq!(song_record_target(&p, c, (BAR + 10) as f64), Some((a, 10.0)));
+        assert_eq!(song_record_target(&p, a, 10.0), Some((b, 10.0)));
+        // Muted: the next track down.
+        p.arrangement.set_muted(1, true);
+        assert_eq!(song_record_target(&p, a, (BAR + 10) as f64), Some((b, (BAR + 10) as f64)));
+        // Two clips on the same track: the one that started last.
+        p.arrangement.clips = vec![clip(a, 0, 0, 4 * BAR), clip(b, 0, BAR, BAR)];
+        assert_eq!(song_record_target(&p, c, (BAR + 10) as f64), Some((b, 10.0)));
+        assert_eq!(song_record_target(&p, c, 10.0), Some((a, 10.0)));
+        assert_eq!(song_record_target(&p, c, (4 * BAR) as f64), None);
+    }
+
+    #[test]
+    fn song_take_is_one_undo_step() {
+        let (mut p, a, _, ch) = song();
+        p.arrangement.clips.push(clip(a, 0, 0, 2 * BAR));
+        let mut h = crate::History::new(&p, 100);
+        add_song_recorded_note(&mut p, a, &played(ch, 100.0, 100.0), OFF);
+        assert!(!h.commit_if_changed(&p, true));
+        add_song_recorded_note(&mut p, a, &played(ch, (BAR + 200) as f64, 100.0), OFF);
+        assert!(h.commit_if_changed(&p, false));
+        assert_eq!(notes(&p, a, ch).len(), 2);
+        assert!(h.undo(&mut p));
+        assert!(notes(&p, a, ch).is_empty());
     }
 }
