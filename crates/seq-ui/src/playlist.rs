@@ -2,17 +2,20 @@
 //! / brush, as in the piano roll), multi-selection, selection loop, track mute.
 //!
 //! Double tap on a clip: deletes it (not with the eraser, which already does). Double tap
-//! on a palette pattern: its menu (delete the pattern and its clips).
+//! on a pattern of the list: its menu (delete the pattern and its clips).
+//!
+//! The pattern list shows one pattern per row and scrolls (drag, wheel, two fingers).
 //!
 //! Touch: two fingers scroll and zoom. With one finger, the strip under the lanes scrolls
-//! horizontally and a drag on the mute column scrolls the tracks. The timeline always
-//! reaches one screen past the end of the song, so there is room for new clips.
+//! horizontally, and a drag on the mute column or on the scroll bar right of the lanes
+//! scrolls the tracks. The timeline always reaches one screen past the end of the song, so
+//! there is room for new clips.
 
 use crate::icons::Icon;
 use crate::piano::{EDGE_PX, EDGE_TOUCH_IN, EDGE_TOUCH_OUT, Tool};
 use crate::skin::{self, Kind};
 use crate::theme::*;
-use crate::widgets::{self, Pointer, scroll_limit, vline};
+use crate::widgets::{self, Pointer, reveal, scroll_for_thumb, scroll_limit, thumb_span, vline};
 use crate::{EditCmd, Editor, PanelId, PlaybackInfo, SeqUi, UiAction};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use seq_edit::{snap_floor, snap_round};
@@ -31,6 +34,13 @@ const HBAR_GAP: f32 = 6.0;
 const MIN_BARS: Tick = 16;
 /// Vertical drag (points) on the mute column before it scrolls rather than taps.
 const SCROLL_SLOP: f32 = 8.0;
+/// Track scroll bar right of the lanes (shown when the tracks do not fit): finger-wide,
+/// with a narrower thumb drawn in the middle, at least `THUMB_MIN` long.
+const VBAR_W: f32 = 20.0;
+const THUMB_MIN: f32 = 28.0;
+/// Rows of the pattern list, and the gap between them.
+const PAT_ROW_H: f32 = 40.0;
+const PAT_ROW_GAP: f32 = 4.0;
 
 #[derive(Clone, PartialEq)]
 enum Drag {
@@ -47,6 +57,8 @@ enum Drag {
     /// Press on the mute column: past a few points of vertical drag, scrolls the tracks
     /// (`y0`, `sy0` = starting position and scroll).
     ScrollY { y0: f32, sy0: f32, scrolling: bool },
+    /// Press on the track scroll bar: the thumb follows the finger, `grab` points below its top.
+    ScrollBar { grab: f32 },
 }
 
 pub struct PlaylistState {
@@ -66,8 +78,11 @@ pub struct PlaylistState {
     /// Draw / select / erase / brush. Brush: press on a clip then drag = end-to-end copies;
     /// on empty space = clips of the selected pattern.
     pub tool: Tool,
-    /// Palette pattern whose menu is open (double tap on its tile).
+    /// Pattern whose menu is open (double tap on its row).
     menu: Option<PatternId>,
+    /// Vertical scroll of the pattern list, and the pattern it last brought into view.
+    list_scroll: f32,
+    revealed: Option<PatternId>,
     /// Clip created by a tap on empty space, and when: the second tap of a double tap
     /// there must not delete it.
     fresh: Option<(usize, f64)>,
@@ -89,6 +104,8 @@ impl Default for PlaylistState {
             clipboard: Vec::new(),
             tool: Tool::Draw,
             menu: None,
+            list_scroll: 0.0,
+            revealed: None,
             fresh: None,
             press_sel: None,
         }
@@ -207,55 +224,9 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         .map(|p| (p.id, (p.name.clone(), p.length.max(1), p.notes.values().flatten().copied().collect())))
         .collect();
 
-    // --- Palette ---
+    // --- Pattern list ---
     let menu_id = ui.make_persistent_id("timeline_tap_menu");
-    let mut tiles: Vec<(PatternId, Rect)> = Vec::new();
-    {
-        let p = ui.painter();
-        skin::caption(p, palette.left_top() + vec2(0.0, 7.0), Align2::LEFT_CENTER, "PATTERNS", pal().text_dimmer);
-        let tile_w = (PALETTE_W - 6.0) / 2.0;
-        let tile_h = 40.0;
-        let rows_avail = ((palette.height() - 18.0 - tile_h - 6.0) / (tile_h + 6.0)).floor().max(1.0) as usize;
-        let mut y = palette.top() + 18.0;
-        let n = project.patterns.len();
-        let shown = n.min(rows_avail * 2);
-        for (i, pat) in project.patterns.iter().take(shown).enumerate() {
-            let r = Rect::from_min_size(pos2(palette.left() + (i % 2) as f32 * (tile_w + 6.0), y), vec2(tile_w, tile_h));
-            let resp = ui.interact(r, ui.id().with(("pal", pat.id.0)), Sense::click());
-            let sel = st.pattern == pat.id;
-            p.rect_filled(r, 7.0, if resp.hovered() { pal().ruler } else { pal().inner });
-            p.rect_stroke(r, 7.0, if sel { Stroke::new(2.0_f32, pal().orange) } else { Stroke::new(1.0_f32, pal().edge) });
-            p.rect_filled(Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(12.0, 12.0)), 3.0, id_color(pat.id.0));
-            p.with_clip_rect(r.shrink(2.0)).text(pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &pat.name, body(15.0), pal().text);
-            let resp = resp.on_hover_text(tr!(
-                "Sélectionner, puis cliquer dans la timeline pour le poser · double-clic : supprimer…",
-                "Select, then click in the timeline to place it · double-click: delete…"
-            ));
-            if resp.clicked() {
-                st.pattern = pat.id;
-            }
-            if resp.double_clicked() {
-                st.playlist.menu = Some(pat.id);
-                ui.memory_mut(|m| m.open_popup(menu_id));
-            }
-            tiles.push((pat.id, r));
-            if i % 2 == 1 {
-                y += tile_h + 6.0;
-            }
-        }
-        if shown % 2 == 1 {
-            y += tile_h + 6.0;
-        }
-        if shown < n {
-            skin::gtext(&p, pos2(palette.left(), y - 2.0), Align2::LEFT_TOP, trf!("+ {} autres (menu du rack)", "+ {} more (rack menu)", n - shown), medium(12.0), pal().text_dimmer);
-            y += 16.0;
-        }
-        let add = Rect::from_min_size(pos2(palette.left(), y), vec2(PALETTE_W, tile_h));
-        let mut au = ui.new_child(egui::UiBuilder::new().max_rect(add));
-        if skin::text_button(&mut au, add.size(), Kind::Ghost, tr!("+ Nouveau pattern", "+ New pattern"), body(14.0)).clicked() {
-            st.pattern = seq_edit::new_pattern(project);
-        }
-    }
+    let tiles = pattern_list(st, ui, palette, project);
 
     // --- Arrangement ---
     let p = ui.painter().clone();
@@ -263,7 +234,16 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let ruler_bg = Rect::from_min_size(arr.min, vec2(arr.width(), RULER_H));
     let lanes = Rect::from_min_max(pos2(arr.left(), ruler_bg.bottom() + 1.0), pos2(arr.left() + LANE_W, arr.bottom()));
     let ruler = Rect::from_min_max(pos2(lanes.right(), arr.top()), ruler_bg.right_bottom());
-    let grid = Rect::from_min_max(pos2(lanes.right(), ruler.bottom() + 1.0), arr.max);
+    let mut grid = Rect::from_min_max(pos2(lanes.right(), ruler.bottom() + 1.0), arr.max);
+    let tracks = project.arrangement.tracks.max(1);
+    let track_h = ((grid.height() - 4.0) / tracks.min(4) as f32).clamp(26.0, 64.0);
+    let content_h = tracks as f32 * (track_h + 2.0) + 2.0;
+    // More tracks than fit: a scroll bar right of the lanes.
+    let vbar = (content_h > grid.height()).then(|| {
+        grid.max.x -= VBAR_W;
+        Rect::from_min_max(pos2(grid.right(), grid.top()), arr.max)
+    });
+    let vspan = |sy: f32| vbar.map(|v| thumb_span(v.height() - 4.0, grid.height(), content_h, sy, THUMB_MIN));
     let resp = ui.interact(arr, ui.id().with("timeline_area"), Sense::click_and_drag());
     let pointer = Pointer::read(ui);
     // Two fingers scroll the panel they are on (the first one), not every panel.
@@ -272,9 +252,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         st.active_editor = Editor::Timeline;
     }
     let edit = st.take_edit(Editor::Timeline);
-    let tracks = project.arrangement.tracks.max(1);
     let ps = &mut st.playlist;
-    let track_h = ((grid.height() - 4.0) / tracks.min(4) as f32).clamp(26.0, 64.0);
 
     // Scroll / zoom (initial zoom: 16 bars across the width).
     if ps.zoom <= 0.0 {
@@ -300,7 +278,6 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let reach = reach(song_end, (grid.width() / ps.zoom) as Tick, bar);
     ps.max_x = scroll_limit(reach, ps.zoom, grid.width(), ps.drag.is_some().then_some(ps.max_x));
     ps.scroll_x = ps.scroll_x.clamp(0.0, ps.max_x);
-    let content_h = tracks as f32 * (track_h + 2.0) + 2.0;
     ps.scroll_y = ps.scroll_y.clamp(0.0, (content_h - grid.height()).max(0.0));
 
     let (zoom, sx, sy, th) = (ps.zoom, ps.scroll_x, ps.scroll_y, track_h);
@@ -413,6 +390,13 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 ps.drag = Some(Drag::Loop { anchor: snap_round(tick_of(pos.x), snap), moved: false });
             } else if lanes.contains(pos) {
                 ps.drag = Some(Drag::ScrollY { y0: pos.y, sy0: ps.scroll_y, scrolling: false });
+            } else if let (Some(v), Some((off, len))) = (vbar.filter(|v| v.contains(pos)), vspan(ps.scroll_y)) {
+                // On the thumb: it follows the finger from where it was grabbed. Elsewhere on
+                // the bar: the thumb jumps under the finger first.
+                let top = v.top() + 2.0 + off;
+                let grab = if (top..=top + len).contains(&pos.y) { pos.y - top } else { len / 2.0 };
+                ps.scroll_y = scroll_for_thumb(v.height() - 4.0, grid.height(), content_h, pos.y - v.top() - 2.0 - grab, THUMB_MIN);
+                ps.drag = Some(Drag::ScrollBar { grab });
             } else if grid.contains(pos) {
                 let t = tick_of(pos.x);
                 let h = hit(clips, pos);
@@ -578,6 +562,11 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                         ps.scroll_y = (sy0 - dy).clamp(0.0, (content_h - grid.height()).max(0.0));
                     }
                 }
+                Drag::ScrollBar { grab } => {
+                    if let Some(v) = vbar {
+                        ps.scroll_y = scroll_for_thumb(v.height() - 4.0, grid.height(), content_h, pos.y - v.top() - 2.0 - grab, THUMB_MIN);
+                    }
+                }
                 Drag::Loop { anchor, moved } => {
                     let cur = snap_round(tick_of(pos.x), snap);
                     if cur != anchor || moved {
@@ -725,11 +714,14 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
             vline(&gp, x, grid.top(), grid.bottom(), pal().lcd_green, 2.0);
         }
     }
-    // More tracks than fit: where the view is, at the right edge.
-    if content_h > grid.height() {
-        let k = grid.height() / content_h;
-        let bar_r = Rect::from_min_max(pos2(grid.right() - 6.0, grid.top() + sy * k), pos2(grid.right() - 2.0, grid.top() + (sy + grid.height()) * k));
-        gp.rect_filled(bar_r, 2.0, pal().thumb_edge);
+    // More tracks than fit: the scroll bar (from the scroll after this frame's input).
+    if let (Some(v), Some((off, len))) = (vbar, vspan(st.playlist.scroll_y)) {
+        let held = matches!(st.playlist.drag, Some(Drag::ScrollBar { .. }));
+        p.rect_filled(v, 0.0, pal().inner_alt);
+        vline(&p, v.left() + 0.5, v.top(), v.bottom(), pal().edge, 1.0);
+        let thumb = Rect::from_min_size(pos2(v.center().x - 4.0, v.top() + 2.0 + off), vec2(8.0, len));
+        p.rect_filled(thumb, 4.0, if held { pal().orange } else { pal().thumb });
+        p.rect_stroke(thumb, 4.0, Stroke::new(1.0_f32, if held { pal().orange } else { pal().thumb_edge }));
     }
     p.rect_stroke(arr, 8.0, Stroke::new(1.0_f32, pal().edge));
     overview(ui, strip, &mut st.playlist, &project.arrangement.clips, tracks, reach, song_end, grid.width());
@@ -750,6 +742,93 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     }
 
     st.actions.extend(actions);
+}
+
+/// Pattern list left of the lanes: one pattern per row, scrolled by a drag (one finger or
+/// the mouse), the wheel or two fingers; "+ New pattern" stays below it. A tap selects the
+/// pattern (then a tap in the lanes places it). Returns the rows on screen.
+fn pattern_list(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project) -> Vec<(PatternId, Rect)> {
+    let menu_id = ui.make_persistent_id("timeline_tap_menu");
+    let p = ui.painter().clone();
+    skin::caption(&p, rect.left_top() + vec2(0.0, 7.0), Align2::LEFT_CENTER, "PATTERNS", pal().text_dimmer);
+    let add = Rect::from_min_max(pos2(rect.left(), (rect.bottom() - PAT_ROW_H).max(rect.top() + 18.0)), rect.max);
+    let list = Rect::from_min_max(pos2(rect.left(), rect.top() + 18.0), pos2(rect.right(), add.top() - 6.0));
+    let step = PAT_ROW_H + PAT_ROW_GAP;
+    let n = project.patterns.len();
+    let content = (n as f32 * step - PAT_ROW_GAP).max(0.0);
+    let max_scroll = (content - list.height()).max(0.0);
+    let ps = &mut st.playlist;
+
+    // The current pattern (just created, picked in the rack…) comes into view.
+    if ps.revealed != Some(st.pattern) {
+        if let Some(i) = project.patterns.iter().position(|p| p.id == st.pattern) {
+            ps.list_scroll = reveal(ps.list_scroll, i as f32 * step, PAT_ROW_H, list.height());
+        }
+        ps.revealed = Some(st.pattern);
+    }
+    let resp = ui.interact(list, ui.id().with("pattern_list"), Sense::click_and_drag());
+    let pointer = Pointer::read(ui);
+    if resp.hovered() || (pointer.multi && pointer.pos.is_some_and(|p| list.contains(p))) {
+        ps.list_scroll -= pointer.scroll.y;
+    }
+    if resp.dragged() && !pointer.multi {
+        ps.list_scroll -= resp.drag_delta().y;
+    }
+    ps.list_scroll = ps.list_scroll.clamp(0.0, max_scroll);
+    let scroll = ps.list_scroll;
+    let under = resp.interact_pointer_pos().or(resp.hover_pos()).and_then(|pos| list_row(pos.y - list.top() + scroll, n));
+    let resp = resp.on_hover_text(tr!(
+        "Sélectionner, puis cliquer dans la timeline pour le poser · double-clic : supprimer…",
+        "Select, then click in the timeline to place it · double-click: delete…"
+    ));
+    if let Some(i) = under {
+        if resp.clicked() {
+            st.pattern = project.patterns[i].id;
+            st.playlist.revealed = Some(st.pattern);
+        }
+        if resp.double_clicked() {
+            st.playlist.menu = Some(project.patterns[i].id);
+            ui.memory_mut(|m| m.open_popup(menu_id));
+        }
+    }
+
+    // Rows (a narrower column when the list scrolls, for its scroll indicator).
+    let overflow = max_scroll > 0.0;
+    let row_w = if overflow { rect.width() - 10.0 } else { rect.width() };
+    let lp = p.with_clip_rect(list.intersect(p.clip_rect()));
+    let mut rows = Vec::new();
+    let first = (scroll / step) as usize;
+    for (i, pat) in project.patterns.iter().enumerate().skip(first) {
+        let r = Rect::from_min_size(pos2(list.left(), list.top() + i as f32 * step - scroll), vec2(row_w, PAT_ROW_H));
+        if r.top() > list.bottom() {
+            break;
+        }
+        let sel = st.pattern == pat.id;
+        let hovered = under == Some(i) && resp.hovered() && !resp.dragged();
+        lp.rect_filled(r, 7.0, if sel { pal().tile_sel } else if hovered { pal().ruler } else { pal().inner });
+        lp.rect_stroke(r, 7.0, if sel { Stroke::new(2.0_f32, pal().orange) } else { Stroke::new(1.0_f32, pal().edge) });
+        lp.rect_filled(Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), vec2(12.0, 12.0)), 3.0, id_color(pat.id.0));
+        lp.with_clip_rect(r.shrink(2.0).intersect(list)).text(pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, &pat.name, body(15.0), pal().text);
+        rows.push((pat.id, r.intersect(list)));
+    }
+    if let Some((off, len)) = overflow.then(|| thumb_span(list.height(), list.height(), content, scroll, THUMB_MIN)) {
+        let thumb = Rect::from_min_size(pos2(list.right() - 5.0, list.top() + off), vec2(4.0, len));
+        p.rect_filled(thumb, 2.0, pal().thumb_edge);
+    }
+
+    let mut au = ui.new_child(egui::UiBuilder::new().max_rect(add));
+    if skin::text_button(&mut au, add.size(), Kind::Ghost, tr!("+ Nouveau pattern", "+ New pattern"), body(14.0)).clicked() {
+        st.pattern = seq_edit::new_pattern(project);
+    }
+    rows
+}
+
+/// Row of the pattern list at `y` points from the top of its content (scroll included),
+/// if any: `None` in the gaps between rows and past the last of the `n` rows.
+fn list_row(y: f32, n: usize) -> Option<usize> {
+    let step = PAT_ROW_H + PAT_ROW_GAP;
+    let k = y / step;
+    (y >= 0.0 && y - k.floor() * step <= PAT_ROW_H).then_some(k as usize).filter(|&i| i < n)
 }
 
 /// Double-tap menu of a palette pattern. Deleting a pattern goes through a menu, never
@@ -854,6 +933,21 @@ mod tests {
         assert!(r.top() - h >= screen.top());
         // A long clip does not stretch the menu.
         assert_eq!(r.width(), 260.0);
+    }
+
+    #[test]
+    fn pattern_list_rows_under_the_finger() {
+        let step = PAT_ROW_H + PAT_ROW_GAP;
+        assert_eq!(list_row(0.0, 3), Some(0));
+        assert_eq!(list_row(PAT_ROW_H - 1.0, 3), Some(0));
+        // In the gap between two rows: none.
+        assert_eq!(list_row(PAT_ROW_H + PAT_ROW_GAP / 2.0, 3), None);
+        assert_eq!(list_row(step + 1.0, 3), Some(1));
+        // Scrolled down to the 15th of 20 patterns.
+        assert_eq!(list_row(14.0 * step + 10.0, 20), Some(14));
+        // Past the last row, or above the first: none.
+        assert_eq!(list_row(3.0 * step + 1.0, 3), None);
+        assert_eq!(list_row(-5.0, 3), None);
     }
 
     #[test]

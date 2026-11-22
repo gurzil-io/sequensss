@@ -74,6 +74,37 @@ pub fn scroll_limit(reach: Tick, zoom: f32, view_w: f32, held: Option<f32>) -> f
     held.map_or(max, |h| max.max(h))
 }
 
+/// Scroll bar thumb: (offset from the start of the bar, length) for a `bar` long bar
+/// showing a `view` long window on `content`, scrolled by `scroll`. The thumb is at least
+/// `min` long, so a finger can still grab it with a lot of content.
+pub fn thumb_span(bar: f32, view: f32, content: f32, scroll: f32, min: f32) -> (f32, f32) {
+    if content <= view || bar <= 0.0 {
+        return (0.0, bar.max(0.0));
+    }
+    let len = (bar * view / content).clamp(min.min(bar), bar);
+    let off = (scroll / (content - view)).clamp(0.0, 1.0) * (bar - len);
+    (off, len)
+}
+
+/// Inverse of [`thumb_span`]: the scroll that puts the thumb at `offset` (clamped).
+pub fn scroll_for_thumb(bar: f32, view: f32, content: f32, offset: f32, min: f32) -> f32 {
+    let (_, len) = thumb_span(bar, view, content, 0.0, min);
+    let free = bar - len;
+    if free <= 0.0 || content <= view { 0.0 } else { (offset / free).clamp(0.0, 1.0) * (content - view) }
+}
+
+/// Scroll that brings the item at `top`..`top + len` (in content coordinates) into a
+/// `view` long window scrolled by `scroll`, moving as little as possible.
+pub fn reveal(scroll: f32, top: f32, len: f32, view: f32) -> f32 {
+    if top < scroll {
+        top
+    } else if top + len > scroll + view {
+        (top + len - view).min(top)
+    } else {
+        scroll
+    }
+}
+
 /// Overview strip under a horizontally scrolled editor (timeline, piano roll): the whole
 /// reach with the content up to `end` tinted, what `marks` draws (given the tick to x
 /// mapping), and the part in view. Tap = jump there, drag = scroll (one finger, while the
@@ -139,6 +170,36 @@ mod tests {
         // Rounded up to a bar.
         assert_eq!(reach(4 * bar + 10, 8 * bar, bar), 13 * bar);
         assert_eq!(reach(0, 0, bar), 0);
+    }
+
+    #[test]
+    fn thumb_follows_the_scroll_and_back() {
+        // Everything fits: the thumb fills the bar.
+        assert_eq!(thumb_span(100.0, 200.0, 150.0, 0.0, 20.0), (0.0, 100.0));
+        assert_eq!(scroll_for_thumb(100.0, 200.0, 150.0, 30.0, 20.0), 0.0);
+        // Half the content in view: half the bar, from the top to the bottom.
+        assert_eq!(thumb_span(100.0, 200.0, 400.0, 0.0, 20.0), (0.0, 50.0));
+        assert_eq!(thumb_span(100.0, 200.0, 400.0, 200.0, 20.0), (50.0, 50.0));
+        assert_eq!(thumb_span(100.0, 200.0, 400.0, 100.0, 20.0), (25.0, 50.0));
+        // Dragging the thumb gives the scroll back, clamped at both ends.
+        assert_eq!(scroll_for_thumb(100.0, 200.0, 400.0, 25.0, 20.0), 100.0);
+        assert_eq!(scroll_for_thumb(100.0, 200.0, 400.0, -10.0, 20.0), 0.0);
+        assert_eq!(scroll_for_thumb(100.0, 200.0, 400.0, 90.0, 20.0), 200.0);
+        // Lots of content: the thumb keeps its minimum length, and still reaches the end.
+        let (off, len) = thumb_span(100.0, 100.0, 10_000.0, 9_900.0, 24.0);
+        assert_eq!((off, len), (76.0, 24.0));
+        assert_eq!(scroll_for_thumb(100.0, 100.0, 10_000.0, 76.0, 24.0), 9_900.0);
+    }
+
+    #[test]
+    fn reveal_scrolls_just_enough() {
+        // Already in view: no change.
+        assert_eq!(reveal(100.0, 120.0, 40.0, 200.0), 100.0);
+        // Above: its top at the top. Below: its bottom at the bottom.
+        assert_eq!(reveal(100.0, 50.0, 40.0, 200.0), 50.0);
+        assert_eq!(reveal(100.0, 300.0, 40.0, 200.0), 140.0);
+        // Taller than the view: its top.
+        assert_eq!(reveal(0.0, 300.0, 400.0, 200.0), 300.0);
     }
 
     #[test]
