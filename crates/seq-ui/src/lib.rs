@@ -34,7 +34,7 @@ mod widgets;
 
 use icons::Icon;
 pub use browser::Browser;
-pub use edit_dialog::EditTarget;
+pub use edit_dialog::{ButtonStyle, EditTarget, question};
 pub use notice::UpdateNotice;
 pub use piano::PianoState;
 pub use playlist::PlaylistState;
@@ -620,6 +620,27 @@ impl SeqUi {
         ui.allocate_space(vec2(col.width(), cu.min_rect().height() + 4.0));
     }
 
+    /// Closes the topmost dialog, menu or expanded panel (Android back button). Returns
+    /// `false` if there was none.
+    pub fn close_overlay(&mut self, ctx: &egui::Context) -> bool {
+        if self.edit_dialog.take().is_some() || self.pattern_delete.take().is_some() {
+            return true;
+        }
+        if ctx.memory(|m| m.any_popup_open()) {
+            ctx.memory_mut(|m| m.close_popup());
+            self.pattern_menu = None;
+            return true;
+        }
+        if self.replacing.take().is_some() || self.synth_open.take().is_some() || self.arp_open.take().is_some() {
+            return true;
+        }
+        if self.settings_open {
+            self.settings_open = false;
+            return true;
+        }
+        self.browser.take().is_some() || self.focus.take().is_some()
+    }
+
     /// A modal dialog is open: the editors behind it get no edit commands.
     fn modal_open(&self) -> bool {
         self.settings_open || self.edit_dialog.is_some() || self.pattern_delete.is_some()
@@ -1079,5 +1100,32 @@ mod tests {
         for key in [Key::Delete, Key::Escape, Key::ArrowLeft] {
             assert_eq!(press(&mut ui, key), None, "{key:?}");
         }
+    }
+
+    #[test]
+    fn back_closes_the_topmost_thing_first() {
+        let project = Project::from_kit(0);
+        let ch = project.channels[0].id;
+        let mut ui = SeqUi::new(&project);
+        let ctx = egui::Context::default();
+        ui.focus = Some(PanelId::Piano);
+        ui.settings_open = true;
+        ui.synth_open = Some(ch);
+        edit_dialog::open(&mut ui, &project, EditTarget::Channel(ch));
+        let popup = egui::Id::new("popup");
+        ctx.memory_mut(|m| m.open_popup(popup));
+
+        assert!(ui.close_overlay(&ctx));
+        assert!(ui.edit_dialog.is_none() && ctx.memory(|m| m.is_popup_open(popup)));
+        assert!(ui.close_overlay(&ctx));
+        assert!(!ctx.memory(|m| m.any_popup_open()) && ui.synth_open.is_some());
+        assert!(ui.close_overlay(&ctx));
+        assert!(ui.synth_open.is_none() && ui.settings_open);
+        assert!(ui.close_overlay(&ctx));
+        assert!(!ui.settings_open && ui.focus.is_some());
+        assert!(ui.close_overlay(&ctx));
+        assert!(ui.focus.is_none());
+        // Nothing left: back leaves the app.
+        assert!(!ui.close_overlay(&ctx));
     }
 }

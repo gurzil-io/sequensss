@@ -27,11 +27,19 @@ impl Files {
     /// App settings: `%APPDATA%\Sequensss\settings.txt` (Windows),
     /// `$XDG_CONFIG_HOME` or `~/.config/sequensss/settings.txt` elsewhere.
     pub fn settings_path(&self) -> Option<PathBuf> {
-        let base = std::env::var_os("APPDATA")
+        Some(Self::config_dir()?.join("settings.txt"))
+    }
+
+    /// Copy of the unsaved work, next to the settings (see `recovery.rs`).
+    pub fn recovery_path(&self) -> Option<PathBuf> {
+        Some(Self::config_dir()?.join(crate::recovery::FILE_NAME))
+    }
+
+    fn config_dir() -> Option<PathBuf> {
+        std::env::var_os("APPDATA")
             .map(|d| PathBuf::from(d).join("Sequensss"))
             .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(|d| PathBuf::from(d).join("sequensss")))
-            .or_else(|| std::env::var_os("HOME").map(|d| PathBuf::from(d).join(".config").join("sequensss")))?;
-        Some(base.join("settings.txt"))
+            .or_else(|| std::env::var_os("HOME").map(|d| PathBuf::from(d).join(".config").join("sequensss")))
     }
 }
 
@@ -44,6 +52,11 @@ impl Files {
 
     pub fn settings_path(&self) -> Option<PathBuf> {
         Some(self.dir.join("settings.txt"))
+    }
+
+    /// Copy of the unsaved work, in the app directory (see `recovery.rs`).
+    pub fn recovery_path(&self) -> Option<PathBuf> {
+        Some(self.dir.join(crate::recovery::FILE_NAME))
     }
 
     /// Subdirectory of the app directory (created if needed): "projects", "exports", "samples".

@@ -81,10 +81,7 @@ pub(crate) fn ok_cancel(ui: &mut Ui, ok: &str, danger: bool) -> (bool, bool) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let ok_resp = if danger {
-            skin::button(ui, vec2(140.0, 44.0), Kind::Dark, false, |p, r, _| {
-                p.rect_stroke(r.shrink(1.0), 8.0, Stroke::new(1.0_f32, pal().danger));
-                skin::gtext(p, r.center(), Align2::CENTER_CENTER, ok, body(15.5), pal().danger);
-            })
+            danger_button(ui, vec2(140.0, 44.0), ok)
         } else {
             skin::text_button(ui, vec2(140.0, 44.0), Kind::Orange, ok, body(15.5))
         };
@@ -92,6 +89,59 @@ pub(crate) fn ok_cancel(ui: &mut Ui, ok: &str, danger: bool) -> (bool, bool) {
         res.1 = skin::text_button(ui, vec2(120.0, 44.0), Kind::Cream, tr!("Annuler", "Cancel"), body(15.5)).clicked();
     });
     res
+}
+
+/// Button for a destructive choice (dark, red outline).
+fn danger_button(ui: &mut Ui, size: egui::Vec2, text: &str) -> egui::Response {
+    skin::button(ui, size, Kind::Dark, false, |p, r, _| {
+        p.rect_stroke(r.shrink(1.0), 8.0, Stroke::new(1.0_f32, pal().danger));
+        skin::gtext(p, r.center(), Align2::CENTER_CENTER, text, body(15.5), pal().danger);
+    })
+}
+
+/// Look of a [`question`] button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonStyle {
+    /// The expected answer (orange).
+    Main,
+    Plain,
+    /// Loses something (red outline).
+    Danger,
+}
+
+/// Modal question with its answers at the bottom right, the first one rightmost. Returns the
+/// index of the answer clicked; Escape or a tap outside the box give `dismiss` (`None`: an
+/// answer is required). Call every frame while the question is open.
+pub fn question(ctx: &egui::Context, id: &str, title: &str, text: &str, buttons: &[(&str, ButtonStyle)], dismiss: Option<usize>) -> Option<usize> {
+    let font = body(15.5);
+    let widths: Vec<f32> = buttons
+        .iter()
+        .map(|(label, _)| ctx.fonts(|f| f.layout_no_wrap(label.to_string(), font.clone(), Color32::WHITE).size().x + 36.0).max(120.0))
+        .collect();
+    let row = widths.iter().sum::<f32>() + 8.0 * buttons.len().saturating_sub(1) as f32;
+    let mut answer = None;
+    let outside = modal(ctx, id, vec2((row + 32.0).max(480.0), 200.0), |ui, rect| {
+        dialog_title(ui, title);
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(egui::RichText::new(text).font(body(16.0)).color(pal().text)).wrap());
+        let used = ui.min_rect().height();
+        ui.add_space((rect.height() - used - 48.0).max(8.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for (i, (&(label, style), &w)) in buttons.iter().zip(&widths).enumerate() {
+                let size = vec2(w, 44.0);
+                let resp = match style {
+                    ButtonStyle::Main => skin::text_button(ui, size, Kind::Orange, label, font.clone()),
+                    ButtonStyle::Plain => skin::text_button(ui, size, Kind::Cream, label, font.clone()),
+                    ButtonStyle::Danger => danger_button(ui, size, label),
+                };
+                if resp.clicked() {
+                    answer = Some(i);
+                }
+            }
+        });
+    });
+    answer.or_else(|| if outside || ctx.input(|i| i.key_pressed(Key::Escape)) { dismiss } else { None })
 }
 
 /// The dialog, if open (call once a frame, after the panels).

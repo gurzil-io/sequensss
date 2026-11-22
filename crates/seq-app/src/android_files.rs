@@ -2,7 +2,8 @@
 //! WAV/MIDI exports sent to the "Share" sheet, WAVs and projects imported with the
 //! Android picker (copied into `samples/` or `projects/`).
 
-use crate::{App, Pending};
+use crate::{App, Pending, close};
+use eframe::egui;
 use seq_i18n::{tr, trf};
 use seq_io::platform::{self, PlatformResult};
 use seq_model::ChannelId;
@@ -93,19 +94,16 @@ impl App {
     }
 
     /// Opens `path`, after confirmation if the current project has unsaved changes.
-    fn open_with_confirm(&mut self, path: PathBuf) {
-        if self.is_dirty() {
-            self.confirm = Some(Pending::OpenPath(path));
-        } else {
-            self.open_path(path);
-        }
+    fn open_with_confirm(&mut self, ctx: &egui::Context, path: PathBuf) {
+        let step = close::request(self.is_dirty());
+        self.answer(ctx, Pending::OpenPath(path), step);
     }
 
-    pub(crate) fn browser_action(&mut self, a: UiAction) {
+    pub(crate) fn browser_action(&mut self, ctx: &egui::Context, a: UiAction) {
         match a {
             UiAction::BrowserOpen(name) => {
                 let path = self.project_path(&name);
-                self.open_with_confirm(path);
+                self.open_with_confirm(ctx, path);
             }
             UiAction::BrowserShare(name) => {
                 platform::share(&self.project_path(&name), "application/octet-stream", tr!("Partager le projet", "Share project"));
@@ -140,19 +138,27 @@ impl App {
     }
 
     /// Results of Android operations (every frame).
-    pub(crate) fn poll_platform(&mut self) {
+    pub(crate) fn poll_platform(&mut self, ctx: &egui::Context) {
         while let Some(PlatformResult { kind, value }) = platform::take_result() {
             let Some(value) = value else {
-                if kind == "sample" {
-                    self.pending_sample = None;
+                match kind.as_str() {
+                    "sample" => self.pending_sample = None,
+                    // Name not given: what waited for the save does not happen.
+                    "save_as" => self.after_save = None,
+                    _ => {}
                 }
                 continue; // cancelled
             };
             match kind.as_str() {
+                "back" => self.on_back(ctx),
                 "save_as" => {
                     let path = self.project_path(&sanitize(&value));
                     self.save_to(path);
                     self.refresh_browser();
+                    if let Some(p) = self.after_save.take() {
+                        let next = close::after_save(!self.is_dirty(), false);
+                        self.answer(ctx, p, next);
+                    }
                 }
                 "name" => self.ui.set_edit_name(value),
                 "sample" => {
@@ -163,7 +169,7 @@ impl App {
                     let path = PathBuf::from(value);
                     if path.extension().is_some_and(|x| x == "ron") {
                         self.ui.browser = None;
-                        self.open_with_confirm(path);
+                        self.open_with_confirm(ctx, path);
                     } else {
                         let _ = std::fs::remove_file(&path);
                         self.ui.status = tr!("Ce n'est pas un projet Sequensss (.ron)", "Not a Sequensss project (.ron)").into();

@@ -1,6 +1,7 @@
 package com.sequensss.app
 
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.WindowCompat
@@ -28,6 +29,21 @@ class MainActivity : GameActivity() {
         super.onCreate(savedInstanceState)
         // A sequencer that is playing must not let the screen go to sleep.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    override fun onPause() {
+        // The app may be killed in the background without warning.
+        PlatformBridge.nativeOnBackground()
+        super.onPause()
+    }
+
+    /** Back goes to the Rust code (the native side would otherwise ignore it). */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) PlatformBridge.onBack()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

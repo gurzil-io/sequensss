@@ -6,22 +6,34 @@ use seq_model::Project;
 use std::path::Path;
 
 pub fn save(project: &Project, path: &Path) -> Result<()> {
-    let s = ron::ser::to_string_pretty(project, ron::ser::PrettyConfig::default())
-        .map_err(|e| IoError::Ron(e.to_string()))?;
-    // Atomic write: temporary file, then rename.
-    let tmp = path.with_extension("ron.tmp");
-    std::fs::write(&tmp, s)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    write_atomic(path, &to_text(project)?)
 }
 
 pub fn load(path: &Path) -> Result<Project> {
-    let s = std::fs::read_to_string(path)?;
-    let p: Project = ron::from_str(&s).map_err(|e| IoError::Ron(e.to_string()))?;
+    from_text(&std::fs::read_to_string(path)?)
+}
+
+/// Contents of a project file.
+pub fn to_text(project: &Project) -> Result<String> {
+    ron::ser::to_string_pretty(project, ron::ser::PrettyConfig::default()).map_err(|e| IoError::Ron(e.to_string()))
+}
+
+/// Project from the contents of a project file (RON comments are allowed).
+pub fn from_text(text: &str) -> Result<Project> {
+    let p: Project = ron::from_str(text).map_err(|e| IoError::Ron(e.to_string()))?;
     if p.version > seq_model::FORMAT_VERSION {
         return Err(IoError::Other(trf!("format v{} trop récent", "format v{} too recent", p.version)));
     }
     Ok(p)
+}
+
+/// Atomic write: temporary file next to `path`, then rename.
+pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 #[cfg(test)]

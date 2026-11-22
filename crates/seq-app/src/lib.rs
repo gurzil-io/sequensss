@@ -3,7 +3,9 @@
 
 #[cfg(target_os = "android")]
 mod android_files;
+mod close;
 pub mod files;
+mod recovery;
 mod update;
 
 pub use eframe;
@@ -20,7 +22,7 @@ use seq_io::midi::{self, MidiInConn, MidiInTx, MidiOutThread};
 use seq_io::{export, project_file, samples};
 use seq_i18n::{tr, trf};
 use seq_model::*;
-use seq_ui::{PlaybackInfo, SeqUi, Splash, UiAction};
+use seq_ui::{ButtonStyle, PlaybackInfo, SeqUi, Splash, UiAction};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
@@ -50,13 +52,21 @@ struct Take {
     dropped: bool,
 }
 
+/// What waits for an answer about the unsaved changes.
 enum Pending {
     New(usize),
     Open,
     /// Open this file (browser or Android import).
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     OpenPath(PathBuf),
+    /// Close the window (desktop) or leave the app (Android back button).
+    Quit,
 }
+
+/// Unsaved work shared with the Android main thread, which copies it when the app goes to
+/// the background (`None`: nothing to keep).
+#[cfg(target_os = "android")]
+type Unsaved = Arc<Mutex<Option<(Project, Option<PathBuf>)>>>;
 
 struct App {
     project: Project,
@@ -101,6 +111,15 @@ struct App {
     recorder: Recorder,
     take: Option<Take>,
     confirm: Option<Pending>,
+    /// Android: waits for the name of an untitled project being saved before going ahead.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    after_save: Option<Pending>,
+    /// Unsaved work found at launch, offered back.
+    restore: Option<recovery::Recovery>,
+    /// Desktop: the window may close (nothing to save, or the user answered).
+    closing: bool,
+    #[cfg(target_os = "android")]
+    unsaved: Unsaved,
     title: String,
     files: Files,
     settings: files::Settings,
@@ -161,6 +180,11 @@ impl App {
             recorder: Recorder::default(),
             take: None,
             confirm: None,
+            after_save: None,
+            restore: None,
+            closing: false,
+            #[cfg(target_os = "android")]
+            unsaved: Arc::new(Mutex::new(None)),
             title: String::new(),
             files,
             settings,
@@ -180,6 +204,7 @@ impl App {
             app.ui.status = a.name.clone();
         }
         app.update_file_label();
+        app.find_recovery();
         app
     }
 
@@ -556,6 +581,91 @@ impl App {
     }
 
     // ------------------------------------------------------------------
+    // Unsaved work (see `recovery.rs`)
+    // ------------------------------------------------------------------
+
+    /// Unsaved work left by the previous run: offered back once the splash is gone.
+    fn find_recovery(&mut self) {
+        let Some(path) = self.files.recovery_path() else { return };
+        self.restore = recovery::read(&path);
+        if self.restore.is_none() {
+            recovery::remove(&path);
+            self.keep_unsaved_in_background();
+        }
+    }
+
+    /// Android: from now on, the unsaved work is copied when the app goes to the background
+    /// (not while the previous copy is still offered back: it would be removed).
+    fn keep_unsaved_in_background(&self) {
+        #[cfg(target_os = "android")]
+        if let Some(path) = self.files.recovery_path() {
+            let unsaved = self.unsaved.clone();
+            seq_io::platform::on_background(move || {
+                let Ok(u) = unsaved.lock() else { return };
+                match &*u {
+                    Some((project, file)) => {
+                        if let Err(e) = recovery::write(&path, project, file.as_deref(), update::unix_now()) {
+                            eprintln!("recovery: {e}");
+                        }
+                    }
+                    None => recovery::remove(&path),
+                }
+            });
+        }
+    }
+
+    /// Android: shares the unsaved work with the main thread (see `Unsaved`).
+    #[cfg(target_os = "android")]
+    fn share_unsaved(&mut self) {
+        let dirty = self.is_dirty();
+        let Ok(mut u) = self.unsaved.lock() else { return };
+        let same = match &*u {
+            Some((p, f)) => dirty && *p == self.project && *f == self.file,
+            None => !dirty,
+        };
+        if !same {
+            *u = dirty.then(|| (self.project.clone(), self.file.clone()));
+        }
+    }
+
+    fn remove_recovery(&self) {
+        if let Some(path) = self.files.recovery_path() {
+            recovery::remove(&path);
+        }
+    }
+
+    /// "Restore unsaved work?" at launch.
+    fn restore_dialog(&mut self, ctx: &egui::Context) {
+        let Some(r) = &self.restore else { return };
+        let name = r.file.as_ref().and_then(|p| p.file_name()).map_or_else(|| tr!("Sans titre", "Untitled").into(), |f| f.to_string_lossy().to_string());
+        let when = recovery::ago(update::unix_now(), r.saved_at);
+        let text = trf!(
+            "Des modifications de « {name} » n'ont pas été enregistrées (copie gardée {when}). Les restaurer ?",
+            "Changes to “{name}” were not saved (copy kept {when}). Restore them?"
+        );
+        let buttons = [(tr!("Restaurer", "Restore"), ButtonStyle::Main), (tr!("Abandonner", "Discard"), ButtonStyle::Danger)];
+        let answer = seq_ui::question(ctx, "restore_dialog", tr!("TRAVAIL NON ENREGISTRÉ", "UNSAVED WORK"), &text, &buttons, None);
+        match answer {
+            Some(0) => {
+                if let Some(r) = self.restore.take() {
+                    // Compared with its file (untitled: the project it replaces, which
+                    // "Don't save" goes back to), the restored work shows as unsaved.
+                    let saved = r.file.as_deref().and_then(|f| project_file::load(f).ok()).unwrap_or_else(|| self.saved.clone());
+                    self.set_project(r.project, r.file);
+                    self.saved = saved;
+                    self.ui.status = tr!("Travail restauré", "Work restored").into();
+                }
+            }
+            Some(_) => {
+                self.restore = None;
+                self.remove_recovery();
+            }
+            None => return,
+        }
+        self.keep_unsaved_in_background();
+    }
+
+    // ------------------------------------------------------------------
     // Files
     // ------------------------------------------------------------------
 
@@ -629,6 +739,7 @@ impl App {
                 self.saved = self.project.clone();
                 self.file = Some(path);
                 self.update_file_label();
+                self.remove_recovery();
                 self.ui.status = tr!("Enregistré", "Saved").into();
             }
             Err(e) => self.ui.status = trf!("Enregistrement impossible : {e}", "Cannot save: {e}"),
@@ -742,12 +853,8 @@ impl App {
             }
             UiAction::Seek(t) => self.send(EngineCmd::Seek(t as f64)),
             UiAction::Preview { channel, key, vel, on } => self.send(EngineCmd::Preview { channel, key, vel, on }),
-            UiAction::NewProject(k) => {
-                if self.is_dirty() { self.confirm = Some(Pending::New(k)) } else { self.do_new(k) }
-            }
-            UiAction::Open => {
-                if self.is_dirty() { self.confirm = Some(Pending::Open) } else { self.do_open() }
-            }
+            UiAction::NewProject(k) => self.answer(ctx, Pending::New(k), close::request(self.is_dirty())),
+            UiAction::Open => self.answer(ctx, Pending::Open, close::request(self.is_dirty())),
             UiAction::Save => self.do_save(false),
             UiAction::SaveAs => self.do_save(true),
             UiAction::ExportWav => self.do_export_wav(),
@@ -805,7 +912,7 @@ impl App {
             | UiAction::BrowserDelete(_)
             | UiAction::BrowserSaveAs
             | UiAction::BrowserImport
-            | UiAction::AskName(..)) => self.browser_action(a),
+            | UiAction::AskName(..)) => self.browser_action(ctx, a),
             // Desktop: native dialogs, no browser; text is typed in the app.
             #[cfg(not(target_os = "android"))]
             UiAction::BrowserOpen(_)
@@ -817,53 +924,106 @@ impl App {
         }
     }
 
+    /// "Save changes?" before `pending` (call every frame).
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(pending) = &self.confirm else { return };
-        let what = match pending {
-            Pending::New(_) => tr!("créer un nouveau projet", "create a new project"),
-            Pending::Open | Pending::OpenPath(_) => tr!("ouvrir un projet", "open a project"),
+        let name = &self.ui.file_label;
+        let text = match pending {
+            Pending::New(_) => trf!("Enregistrer les modifications de « {name} » avant de créer un nouveau projet ?", "Save changes to “{name}” before creating a new project?"),
+            Pending::Open | Pending::OpenPath(_) => trf!("Enregistrer les modifications de « {name} » avant d'ouvrir un projet ?", "Save changes to “{name}” before opening a project?"),
+            Pending::Quit => trf!("Enregistrer les modifications de « {name} » ?", "Save changes to “{name}”?"),
         };
-        let mut choice = None;
-        egui::Window::new(tr!("Modifications non enregistrées", "Unsaved changes"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(trf!(
-                    "Le projet a des modifications non enregistrées. Les perdre et {what} ?",
-                    "The project has unsaved changes. Discard them and {what}?"
-                ));
-                ui.horizontal(|ui| {
-                    if ui.button(tr!("Enregistrer d'abord", "Save first")).clicked() {
-                        choice = Some(0);
-                    }
-                    if ui.button(tr!("Perdre les modifications", "Discard changes")).clicked() {
-                        choice = Some(1);
-                    }
-                    if ui.button(tr!("Annuler", "Cancel")).clicked() {
-                        choice = Some(2);
-                    }
-                });
-            });
-        if let Some(c) = choice {
-            let pending = self.confirm.take();
-            match c {
-                0 => {
-                    self.do_save(false);
-                    if self.is_dirty() {
-                        return;
-                    }
+        let buttons = [
+            (tr!("Enregistrer", "Save"), ButtonStyle::Main),
+            (tr!("Annuler", "Cancel"), ButtonStyle::Plain),
+            (tr!("Ne pas enregistrer", "Don't save"), ButtonStyle::Danger),
+        ];
+        let title = tr!("MODIFICATIONS NON ENREGISTRÉES", "UNSAVED CHANGES");
+        let answer = match seq_ui::question(ctx, "confirm_dialog", title, &text, &buttons, Some(1)) {
+            Some(0) => close::Answer::Save,
+            Some(2) => close::Answer::DontSave,
+            Some(_) => close::Answer::Cancel,
+            None => return,
+        };
+        let Some(pending) = self.confirm.take() else { return };
+        self.answer(ctx, pending, close::answer(answer));
+    }
+
+    /// Carries on with `pending` according to `step`.
+    fn answer(&mut self, ctx: &egui::Context, pending: Pending, step: close::Step) {
+        match step {
+            close::Step::Ask => self.confirm = Some(pending),
+            close::Step::Proceed => self.proceed(ctx, pending),
+            close::Step::Discard => {
+                self.remove_recovery();
+                if matches!(pending, Pending::Quit) && cfg!(target_os = "android") {
+                    // The app stays in memory: back to the saved state (one undo step).
+                    self.project = self.saved.clone();
                 }
-                2 => return,
-                _ => {}
+                self.proceed(ctx, pending);
             }
-            match pending {
-                Some(Pending::New(k)) => self.do_new(k),
-                Some(Pending::Open) => self.do_open(),
-                Some(Pending::OpenPath(p)) => self.open_path(p),
-                None => {}
+            close::Step::Save => {
+                // Android, untitled: the name is asked in a system dialog (see `poll_platform`).
+                let naming = cfg!(target_os = "android") && self.file.is_none();
+                self.do_save(false);
+                let next = close::after_save(!self.is_dirty(), naming);
+                self.answer(ctx, pending, next);
+            }
+            close::Step::WaitForName => self.after_save = Some(pending),
+            close::Step::Stay => {}
+        }
+    }
+
+    fn proceed(&mut self, ctx: &egui::Context, pending: Pending) {
+        match pending {
+            Pending::New(k) => self.do_new(k),
+            Pending::Open => self.do_open(),
+            Pending::OpenPath(p) => self.open_path(p),
+            Pending::Quit => self.quit(ctx),
+        }
+    }
+
+    /// Desktop: closes the window. Android: leaves the app (it stays in memory).
+    fn quit(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "android")]
+        {
+            let _ = ctx;
+            seq_io::platform::leave();
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            self.closing = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Desktop: the window is asked to close (close button, Cmd+Q, Alt+F4).
+    #[cfg(not(target_os = "android"))]
+    fn on_close_request(&mut self, ctx: &egui::Context) {
+        if self.closing || !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        match close::request(self.is_dirty()) {
+            close::Step::Proceed => self.closing = true,
+            step => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.answer(ctx, Pending::Quit, step);
             }
         }
+    }
+
+    /// Android back button: closes the topmost dialog, menu or expanded panel; otherwise
+    /// leaves the app, after asking about unsaved changes.
+    #[cfg(target_os = "android")]
+    pub(crate) fn on_back(&mut self, ctx: &egui::Context) {
+        if self.restore.is_some() || self.splash.is_some() {
+            return; // needs an answer / about to go
+        }
+        if self.confirm.take().is_some() || self.ui.close_overlay(ctx) {
+            return;
+        }
+        let step = close::request(self.is_dirty());
+        self.answer(ctx, Pending::Quit, step);
     }
 }
 
@@ -872,7 +1032,9 @@ impl eframe::App for App {
         self.poll_engine();
         self.poll_update_check();
         #[cfg(target_os = "android")]
-        self.poll_platform();
+        self.poll_platform(ctx);
+        #[cfg(not(target_os = "android"))]
+        self.on_close_request(ctx);
 
         let (playing, playhead, pattern, count_in) = match &self.handle {
             Some(h) => {
@@ -913,6 +1075,9 @@ impl eframe::App for App {
             self.handle_action(ctx, a);
         }
         self.confirm_dialog(ctx);
+        if self.splash.is_none() {
+            self.restore_dialog(ctx);
+        }
 
         // A gesture lasts while any finger is down (not only the one egui maps to the pointer);
         // a recording take is committed when playback stops.
@@ -920,6 +1085,8 @@ impl eframe::App for App {
             || ctx.wants_keyboard_input()
             || self.recording_take(running);
         self.history.commit_if_changed(&self.project, gesture);
+        #[cfg(target_os = "android")]
+        self.share_unsaved();
         self.sync_engine();
         self.poll_samples();
 
@@ -933,6 +1100,22 @@ impl eframe::App for App {
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(Duration::from_millis(80));
+        }
+    }
+
+    /// Desktop: quitting without the close request (Quit from the macOS menu or the Dock)
+    /// cannot be stopped; the unsaved work is kept for the next launch.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let Some(path) = self.files.recovery_path() else { return };
+        if self.restore.is_some() {
+            return; // still offered at the next launch
+        }
+        if self.is_dirty() && !self.closing {
+            if let Err(e) = recovery::write(&path, &self.project, self.file.as_deref(), update::unix_now()) {
+                eprintln!("recovery: {e}");
+            }
+        } else {
+            recovery::remove(&path);
         }
     }
 }

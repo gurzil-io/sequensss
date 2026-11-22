@@ -1,12 +1,18 @@
 //! Android services (JNI bridge to `com.sequensss.app.PlatformBridge`): file picker,
-//! native text input dialog, "Share" sheet, web links.
+//! native text input dialog, "Share" sheet, web links, back button, leaving the app,
+//! going to the background.
 //!
 //! Everything is asynchronous: start the operation, then read the results every frame with
-//! [`take_result`].
+//! [`take_result`] (the back button comes as a result of kind `"back"`).
 
 use crate::android_jni::{opt_string, with_class};
-use jni::objects::{JObject, JValue};
+use jni::JNIEnv;
+use jni::objects::{JClass, JObject, JValue};
 use std::path::Path;
+use std::sync::Mutex;
+
+/// Run when the activity is paused (see [`on_background`]).
+static BACKGROUND: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
 
 const CLASS: &str = "com.sequensss.app.PlatformBridge";
 
@@ -82,6 +88,32 @@ pub fn open_url(url: &str) {
         env.call_static_method(c, "openUrl", "(Ljava/lang/String;)V", &[JValue::Object(&u)])?;
         Ok(())
     }));
+}
+
+/// Leaves the app (to the background, like the system's back button on the home screen).
+pub fn leave() {
+    log_err(with_class(CLASS, |env, c| {
+        env.call_static_method(c, "leave", "()V", &[])?;
+        Ok(())
+    }));
+}
+
+/// Sets what to do when the app goes to the background (it may be killed there without
+/// warning). Runs on the Android main thread, while the app is paused: keep it short.
+pub fn on_background(f: impl Fn() + Send + 'static) {
+    if let Ok(mut b) = BACKGROUND.lock() {
+        *b = Some(Box::new(f));
+    }
+}
+
+/// Called by `MainActivity.onPause` (through `PlatformBridge`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_sequensss_app_PlatformBridge_nativeOnBackground(_env: JNIEnv, _class: JClass) {
+    if let Ok(b) = BACKGROUND.lock()
+        && let Some(f) = b.as_ref()
+    {
+        f();
+    }
 }
 
 /// Next available result (call every frame).

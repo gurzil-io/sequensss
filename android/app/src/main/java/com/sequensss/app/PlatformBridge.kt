@@ -16,7 +16,8 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * Android services for the Rust code (crates/seq-io/src/platform_android.rs):
- * file picker, text input dialog, sharing, web links.
+ * file picker, text input dialog, sharing, web links, back button, leaving the app,
+ * going to the background.
  *
  * Operations are asynchronous: the result goes into a queue that Rust reads every
  * frame (`takeResult`), as "kind\nvalue" ("kind\n" alone = cancelled).
@@ -154,6 +155,18 @@ object PlatformBridge {
             }
         }
     }
+
+    /** Back button: Rust closes what is open, asks to save, or calls [leave]. */
+    fun onBack() = post("back", "1")
+
+    /** Leaves the app (to the background, like back on the home screen). */
+    @JvmStatic fun leave() {
+        val a = activity?.get() ?: return
+        a.runOnUiThread { a.moveTaskToBack(true) }
+    }
+
+    /** The app goes to the background: Rust keeps a copy of the unsaved work. */
+    @JvmStatic external fun nativeOnBackground()
 
     /** Opens a web page (release notes) in the browser. */
     @JvmStatic fun openUrl(url: String) {
