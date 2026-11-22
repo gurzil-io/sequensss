@@ -87,3 +87,20 @@ fn pattern_color_round_trip() {
     p.pattern_mut(verse).unwrap().color = None;
     assert_eq!(pretty(&p), V1);
 }
+
+#[test]
+fn channel_color_round_trip() {
+    let mut p: Project = ron::from_str(V1).unwrap();
+    // Channel colors did not exist yet: the theme's, from the id.
+    assert!(p.channels.iter().all(|c| c.color.is_none()));
+    let lead = p.channels.iter().find(|c| c.name == "Lead").unwrap().id;
+    p.channel_mut(lead).unwrap().color = Some([250, 90, 160]);
+    let text = pretty(&p);
+    assert_eq!(text.matches("color:").count(), 1);
+    let back: Project = ron::from_str(&text).unwrap();
+    assert_eq!(back, p);
+    assert_eq!(back.channel(lead).unwrap().color, Some([250, 90, 160]));
+    // No custom color again: the file is the old one, byte for byte.
+    p.channel_mut(lead).unwrap().color = None;
+    assert_eq!(pretty(&p), V1);
+}

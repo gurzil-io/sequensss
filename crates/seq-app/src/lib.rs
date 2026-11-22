@@ -726,7 +726,7 @@ impl App {
             | UiAction::BrowserDelete(_)
             | UiAction::BrowserSaveAs
             | UiAction::BrowserImport
-            | UiAction::AskPatternName(_)) => self.browser_action(a),
+            | UiAction::AskName(..)) => self.browser_action(a),
             // Desktop: native dialogs, no browser; text is typed in the app.
             #[cfg(not(target_os = "android"))]
             UiAction::BrowserOpen(_)
@@ -734,7 +734,7 @@ impl App {
             | UiAction::BrowserDelete(_)
             | UiAction::BrowserSaveAs
             | UiAction::BrowserImport
-            | UiAction::AskPatternName(_) => {}
+            | UiAction::AskName(..) => {}
         }
     }
 

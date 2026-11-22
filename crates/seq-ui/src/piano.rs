@@ -291,7 +291,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
         let (cur, color) = st
             .channel
             .and_then(|c| project.channel(c))
-            .map(|c| (c.name.clone(), id_color(c.id.0)))
+            .map(|c| (c.name.clone(), channel_rgb(c)))
             .unwrap_or(("—".into(), pal().seg_on));
         // Small screen: icon-only tools (the brush would not fit otherwise).
         let narrow = ui.available_width() < 1000.0;
@@ -383,7 +383,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
     let default_key = project.channel(ch).map(|c| c.default_key).unwrap_or(60);
     let bar = project.bar_len();
     let beat = project.beat_len();
-    let color = id_color(ch.0);
+    let color = project.channel(ch).map_or_else(|| id_color(ch.0), channel_rgb);
     let (note_top, note_bot, note_edge) = note_colors(color);
 
     let strip = Rect::from_min_max(pos2(area.left() + KB_W, area.bottom() - HBAR_H), area.max);

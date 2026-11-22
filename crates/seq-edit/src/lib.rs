@@ -283,6 +283,29 @@ pub fn move_channel(project: &mut Project, channel: ChannelId, up: bool) {
     }
 }
 
+/// Renames a channel (trimmed). An empty name is refused (`false`).
+pub fn rename_channel(project: &mut Project, channel: ChannelId, name: &str) -> bool {
+    let name = name.trim();
+    match project.channel(channel) {
+        Some(c) if !name.is_empty() && c.name != name => {
+            if let Some(c) = project.channel_mut(channel) {
+                c.name = name.to_string();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Changes a channel's color (a channel that keeps its color stays shared with the undo history).
+pub fn set_channel_color(project: &mut Project, channel: ChannelId, color: Rgb) {
+    if project.channel(channel).is_some_and(|c| c.color != Some(color))
+        && let Some(c) = project.channel_mut(channel)
+    {
+        c.color = Some(color);
+    }
+}
+
 /// Adds an empty one-bar pattern with a random color, at the end of the list.
 pub fn new_pattern(project: &mut Project) -> PatternId {
     let n = project.patterns.len() + 1;
@@ -1159,6 +1182,27 @@ mod tests {
         // Same color again: nothing changes, nothing to commit.
         assert!(h.redo(&mut p));
         set_pattern_color(&mut p, pat, [1, 2, 3]);
+        assert!(!h.commit_if_changed(&p, false));
+    }
+
+    #[test]
+    fn rename_and_recolor_channel_in_one_undo_step() {
+        let (mut p, _, ch) = setup();
+        let before = p.channel(ch).unwrap().clone();
+        let mut h = History::new(&p, 100);
+        assert!(!rename_channel(&mut p, ch, "  "));
+        assert!(!rename_channel(&mut p, ch, &before.name));
+        assert!(!rename_channel(&mut p, ChannelId(999), "Bass"));
+        set_channel_color(&mut p, ch, [10, 20, 30]);
+        assert!(rename_channel(&mut p, ch, " Bass  "));
+        assert_eq!(p.channel(ch).unwrap().name, "Bass");
+        assert_eq!(p.channel(ch).unwrap().color, Some([10, 20, 30]));
+        assert!(h.commit_if_changed(&p, false));
+        assert!(h.undo(&mut p));
+        assert_eq!(*p.channel(ch).unwrap(), before);
+        // Same color again: nothing changes, nothing to commit.
+        assert!(h.redo(&mut p));
+        set_channel_color(&mut p, ch, [10, 20, 30]);
         assert!(!h.commit_if_changed(&p, false));
     }
 

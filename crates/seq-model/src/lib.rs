@@ -85,6 +85,10 @@ pub struct Channel {
     /// replaced (at most one of each), restored when switching back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previous_kinds: Vec<ChannelKind>,
+    /// Color chosen for the channel. Missing (older files, new channels): a color of the
+    /// theme, from the id. Not written when missing: older versions read the file as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Rgb>,
 }
 
 impl Channel {
@@ -503,6 +507,7 @@ impl Project {
             choke: 0,
             arp: ArpParams::default(),
             previous_kinds: Vec::new(),
+            color: None,
         }));
         Some(id)
     }

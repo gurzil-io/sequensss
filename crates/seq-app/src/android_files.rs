@@ -6,7 +6,7 @@ use crate::{App, Pending};
 use seq_i18n::{tr, trf};
 use seq_io::platform::{self, PlatformResult};
 use seq_model::ChannelId;
-use seq_ui::{Browser, UiAction};
+use seq_ui::{Browser, EditTarget, UiAction};
 use std::path::PathBuf;
 
 const PROJECTS: &str = "projects";
@@ -128,8 +128,12 @@ impl App {
             }
             UiAction::BrowserSaveAs => self.ask_save_name(),
             UiAction::BrowserImport => platform::pick("project", PROJECTS, &["application/octet-stream", "*/*"]),
-            UiAction::AskPatternName(name) => {
-                platform::prompt("pattern_name", tr!("Nom du pattern", "Pattern name"), &name, "OK", tr!("Annuler", "Cancel"));
+            UiAction::AskName(target, name) => {
+                let title = match target {
+                    EditTarget::Pattern(_) => tr!("Nom du pattern", "Pattern name"),
+                    EditTarget::Channel(_) => tr!("Nom du channel", "Channel name"),
+                };
+                platform::prompt("name", title, &name, "OK", tr!("Annuler", "Cancel"));
             }
             _ => {}
         }
@@ -150,7 +154,7 @@ impl App {
                     self.save_to(path);
                     self.refresh_browser();
                 }
-                "pattern_name" => self.ui.set_pattern_name(value),
+                "name" => self.ui.set_edit_name(value),
                 "sample" => {
                     let target = self.pending_sample.take().flatten();
                     self.load_sample_path(target, PathBuf::from(value));

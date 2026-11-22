@@ -1,5 +1,6 @@
 //! Channel rack: one row per channel (mute, solo, tile, step sequencer steps).
 
+use crate::edit_dialog::{self, EditTarget};
 use crate::icons::Icon;
 use crate::pattern_menu;
 use crate::skin::{self, Kind};
@@ -96,7 +97,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
 
     let res = skin::panel(ui, rect, "CHANNEL RACK", pal().orange, |ui| {
         // Current pattern, and its menu (⋯) right next to it.
-        let (name, color) = project.pattern(pat_id).map(|p| (p.name.clone(), pattern_menu::pattern_rgb(p))).unwrap_or_default();
+        let (name, color) = project.pattern(pat_id).map(|p| (p.name.clone(), pattern_rgb(p))).unwrap_or_default();
         ui.spacing_mut().item_spacing.x = 4.0;
         // Narrower when the header is short (docked on a tablet with the Retro title), so
         // the ⋯ button and the length controls still fit.
@@ -224,7 +225,7 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                 continue;
             }
             let p = ui.painter().clone();
-            let color = id_color(ch.id.0);
+            let color = channel_rgb(&ch);
 
             // Mute / Solo
             let m_rect = Rect::from_min_size(row.min, vec2(44.0, 44.0));
@@ -326,22 +327,22 @@ pub fn show(st: &mut SeqUi, ui: &mut Ui, rect: Rect, project: &mut Project, info
                         st.open_sound_settings(ch.id);
                         ui.close_menu();
                     }
-                    // Rename and duplicate share a row, so the menu still fits a phone in landscape.
+                    if skin::menu_item(ui, tr!("Modifier (nom, couleur)…", "Edit (name, color)…"), pal().text, false).clicked() {
+                        edit_dialog::open(st, project, EditTarget::Channel(ch.id));
+                        ui.close_menu();
+                    }
+                    // Duplicate and replace share a row, so the menu still fits a phone in landscape.
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         let w = (ui.available_width() - 4.0) / 2.0;
-                        if skin::text_button(ui, vec2(w, 44.0), Kind::Dark, tr!("Renommer…", "Rename…"), body(15.0)).clicked() {
-                            st.renaming_channel = Some((ch.id, ch.name.clone()));
-                            ui.close_menu();
-                        }
                         if skin::text_button(ui, vec2(w, 44.0), Kind::Dark, tr!("Dupliquer", "Duplicate"), body(15.0)).clicked() {
                             op = Some(RowOp::Duplicate(ch.id));
                             ui.close_menu();
                         }
+                        if skin::text_button(ui, vec2(w, 44.0), Kind::Dark, tr!("Remplacer par…", "Replace with…"), body(15.0)).clicked() {
+                            st.replacing = Some(ch.id);
+                        }
                     });
-                    if skin::menu_item(ui, tr!("Remplacer par…", "Replace with…"), pal().text, false).clicked() {
-                        st.replacing = Some(ch.id);
-                    }
                     note_clipboard_items(st, ui, project, pat_id, ch.id);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;

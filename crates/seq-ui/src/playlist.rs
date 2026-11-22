@@ -12,7 +12,7 @@
 //! there is room for new clips.
 
 use crate::icons::Icon;
-use crate::pattern_menu::{self, pattern_rgb};
+use crate::pattern_menu;
 use crate::piano::{EDGE_PX, EDGE_TOUCH_IN, EDGE_TOUCH_OUT, Tool};
 use crate::skin::{self, Kind};
 use crate::theme::*;

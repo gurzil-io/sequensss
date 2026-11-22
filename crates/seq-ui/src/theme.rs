@@ -4,6 +4,7 @@
 //! every field. The values mirror the "Sequensss Retro" design system (tokens.json).
 
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId, Rounding, Stroke, Vec2};
+use seq_model::{Channel, Pattern, Rgb};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 pub const fn hex(c: u32) -> Color32 {
@@ -416,7 +417,7 @@ pub const DISPLAY: Palette = Palette {
     hover_channel: hex(0x1a2220),
 };
 
-/// Channel and pattern colors (assigned by id).
+/// Channel and pattern colors by id, for those without a color of their own.
 pub fn channel_palette() -> [Color32; 6] {
     let p = pal();
     [p.red, p.orange, p.yellow, p.cream_c, p.teal, p.terracotta]
@@ -425,6 +426,21 @@ pub fn channel_palette() -> [Color32; 6] {
 pub fn id_color(id: u32) -> Color32 {
     let palette = channel_palette();
     palette[id as usize % palette.len()]
+}
+
+/// Color chosen by the user, or one of the theme's from the id.
+fn own_color(color: Option<Rgb>, id: u32) -> Color32 {
+    color.map_or_else(|| id_color(id), |[r, g, b]| Color32::from_rgb(r, g, b))
+}
+
+/// Color a pattern is drawn with: its own, or one of the theme's from its id.
+pub fn pattern_rgb(p: &Pattern) -> Color32 {
+    own_color(p.color, p.id.0)
+}
+
+/// Color a channel is drawn with (card, dots, notes): its own, or one of the theme's from its id.
+pub fn channel_rgb(c: &Channel) -> Color32 {
+    own_color(c.color, c.id.0)
 }
 
 pub fn with_alpha(c: Color32, a: u8) -> Color32 {

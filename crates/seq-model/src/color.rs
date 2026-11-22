@@ -1,5 +1,5 @@
-//! Pattern colors: any RGB, picked by hue at a fixed saturation and brightness that reads
-//! well on the dark grounds of both themes.
+//! Pattern and channel colors: any RGB, picked by hue at a fixed saturation and brightness
+//! that reads well on the dark grounds of both themes.
 
 /// An sRGB color.
 pub type Rgb = [u8; 3];

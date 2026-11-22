@@ -174,7 +174,7 @@ fn channel_picker(ui: &mut Ui, project: &Project, cur: &Channel) -> Option<Chann
     let w1 = ui.fonts(|f| f.layout_no_wrap(cur.name.clone(), body(15.0), pal().text).size().x);
     let w2 = ui.fonts(|f| f.layout_no_wrap(kind.clone(), medium(13.0), pal().text).size().x);
     let w = (w1 + w2 + 12.0 + 18.0 + 6.0 + 30.0).clamp(140.0, (ui.available_width() - 44.0).max(140.0));
-    skin::dropdown(ui, "sound_channel", vec2(w, 38.0), Some((id_color(cur.id.0), true)), &cur.name, Some(&kind), |ui| {
+    skin::dropdown(ui, "sound_channel", vec2(w, 38.0), Some((channel_rgb(cur), true)), &cur.name, Some(&kind), |ui| {
         skin::menu_caption(ui, "CHANNEL");
         for c in &project.channels {
             if skin::menu_item(ui, &c.name, pal().text, c.id == cur.id).clicked() {

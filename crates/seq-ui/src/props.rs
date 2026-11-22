@@ -1,7 +1,7 @@
-//! Secondary windows: synth settings, arpeggiator settings, renaming.
+//! Secondary windows: synth settings, arpeggiator settings.
 
 use crate::SeqUi;
-use crate::skin::{self, Kind};
+use crate::skin;
 use crate::theme::*;
 use eframe::egui::{self, vec2};
 use seq_model::*;
@@ -10,7 +10,6 @@ use seq_i18n::{tr, trf};
 pub fn windows(st: &mut SeqUi, ctx: &egui::Context, project: &mut Project) {
     synth_window(st, ctx, project);
     arp_window(st, ctx, project);
-    rename_windows(st, ctx, project);
 }
 
 fn window<'a>(title: String, id: &str) -> egui::Window<'a> {
@@ -56,31 +55,6 @@ fn arp_window(st: &mut SeqUi, ctx: &egui::Context, project: &mut Project) {
     });
     if !open {
         st.arp_open = None;
-    }
-}
-
-fn rename_windows(st: &mut SeqUi, ctx: &egui::Context, project: &mut Project) {
-    if let Some((cid, mut name)) = st.renaming_channel.take() {
-        let mut keep = true;
-        window(tr!("RENOMMER LE CHANNEL", "RENAME CHANNEL").into(), "rename_ch").show(ctx, |ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(300.0).font(body(17.0)));
-            r.request_focus();
-            ui.horizontal(|ui| {
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if skin::text_button(ui, vec2(110.0, 40.0), Kind::Orange, "OK", body(15.0)).clicked() || enter {
-                    if let (Some(c), false) = (project.channel_mut(cid), name.trim().is_empty()) {
-                        c.name = name.trim().to_string();
-                    }
-                    keep = false;
-                }
-                if skin::text_button(ui, vec2(110.0, 40.0), Kind::Cream, tr!("Annuler", "Cancel"), body(15.0)).clicked() {
-                    keep = false;
-                }
-            });
-        });
-        if keep {
-            st.renaming_channel = Some((cid, name));
-        }
     }
 }
 
