@@ -22,6 +22,8 @@ pub enum Theme {
 
 impl Theme {
     pub const ALL: [Theme; 2] = [Theme::Retro, Theme::Display];
+    /// Look used until the user picks one.
+    pub const DEFAULT: Theme = Theme::Display;
 
     pub fn code(self) -> &'static str {
         match self {
@@ -42,15 +44,15 @@ impl Theme {
     }
 }
 
-static CURRENT: AtomicU8 = AtomicU8::new(0);
+static CURRENT: AtomicU8 = AtomicU8::new(Theme::DEFAULT as u8);
 
 pub fn get() -> Theme {
-    if CURRENT.load(Ordering::Relaxed) == 1 { Theme::Display } else { Theme::Retro }
+    if CURRENT.load(Ordering::Relaxed) == Theme::Display as u8 { Theme::Display } else { Theme::Retro }
 }
 
 /// Switches the theme; call [`apply`] afterwards so egui's own widgets follow.
 pub fn set(theme: Theme) {
-    CURRENT.store(if theme == Theme::Display { 1 } else { 0 }, Ordering::Relaxed);
+    CURRENT.store(theme as u8, Ordering::Relaxed);
 }
 
 /// Colors of the current theme.

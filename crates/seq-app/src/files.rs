@@ -59,7 +59,7 @@ impl Files {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub lang: Option<seq_i18n::Lang>,
-    /// Chosen look (Retro by default).
+    /// Chosen look (`Theme::DEFAULT` until the user picks one).
     pub theme: Option<seq_ui::theme::Theme>,
     /// Check GitHub for a newer release at startup (on by default).
     pub check_updates: bool,

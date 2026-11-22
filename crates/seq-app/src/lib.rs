@@ -865,7 +865,7 @@ pub fn run(options: eframe::NativeOptions, path: Option<PathBuf>, files: Files, 
         .or_else(|| locale.as_deref().map(seq_i18n::Lang::from_locale))
         .unwrap_or(seq_i18n::Lang::Fr);
     seq_i18n::set(lang);
-    seq_ui::theme::set(settings.theme.unwrap_or(seq_ui::theme::Theme::Retro));
+    seq_ui::theme::set(settings.theme.unwrap_or(seq_ui::theme::Theme::DEFAULT));
     eframe::run_native(
         "Sequensss",
         options,
