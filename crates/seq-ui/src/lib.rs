@@ -54,6 +54,9 @@ pub enum UiAction {
     SaveAs,
     ExportWav,
     ExportMidi,
+    /// Render and send to the "Share" sheet (when `share_exports`).
+    ShareWav,
+    ShareMidi,
     Undo,
     Redo,
     /// Pick a WAV: for an existing channel, or `None` to create a channel.
@@ -71,13 +74,12 @@ pub enum UiAction {
     OpenUrl(String),
     /// Do not notify about this version again.
     SkipVersion(String),
-    /// Project browser (Android): open / share / delete a project by name,
-    /// save under a new name, import a file from the device.
+    /// Projects kept in the app folder (Android): open / share / delete one by name, or
+    /// open a file anywhere on the device with the system picker.
     BrowserOpen(String),
     BrowserShare(String),
     BrowserDelete(String),
-    BrowserSaveAs,
-    BrowserImport,
+    BrowserPickFile,
     /// Ask for the name of a pattern or channel in the system's text dialog (when
     /// `native_text_input`), from this one; the answer goes to [`SeqUi::set_edit_name`].
     AskName(EditTarget, String),
@@ -232,6 +234,8 @@ pub struct SeqUi {
     /// Text is typed in the system's dialog rather than in the app (Android: the soft
     /// keyboard cannot type into egui). Set by the app.
     pub native_text_input: bool,
+    /// Exports can also be sent to the system's "Share" sheet (Android). Set by the app.
+    pub share_exports: bool,
     /// Channel menu showing the "Replace with" choices.
     replacing: Option<ChannelId>,
     step_paint: Option<(ChannelId, bool)>,
@@ -288,6 +292,7 @@ impl SeqUi {
             pattern_delete: None,
             edit_dialog: None,
             native_text_input: false,
+            share_exports: false,
             replacing: None,
             step_paint: None,
             channel_clipboard: Vec::new(),
@@ -316,7 +321,7 @@ impl SeqUi {
         let status = std::mem::take(&mut self.status);
         let update = self.update.take();
         let (focus, tab, check_updates) = (self.focus, self.tab, self.check_updates);
-        let (quantize, count_in, native) = (self.quantize, self.count_in, self.native_text_input);
+        let (quantize, count_in, native, share) = (self.quantize, self.count_in, self.native_text_input, self.share_exports);
         let clipboard = std::mem::take(&mut self.channel_clipboard);
         *self = SeqUi::new(project);
         self.channel_clipboard = clipboard;
@@ -327,6 +332,7 @@ impl SeqUi {
         self.quantize = quantize;
         self.count_in = count_in;
         self.native_text_input = native;
+        self.share_exports = share;
         self.focus = focus;
         self.tab = tab;
     }
@@ -957,6 +963,13 @@ impl SeqUi {
             }
             if skin::menu_item(ui, tr!("Exporter en MIDI…", "Export MIDI…"), pal().text, false).clicked() {
                 self.act(UiAction::ExportMidi);
+            }
+            if self.share_exports {
+                for (label, a) in [(tr!("Partager en WAV", "Share as WAV"), UiAction::ShareWav), (tr!("Partager en MIDI", "Share as MIDI"), UiAction::ShareMidi)] {
+                    if skin::menu_item(ui, label, pal().text, false).clicked() {
+                        self.act(a);
+                    }
+                }
             }
             skin::menu_separator(ui);
             if skin::menu_item(ui, tr!("Réglages…", "Settings…"), pal().text, false).clicked() {

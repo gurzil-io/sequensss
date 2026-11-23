@@ -1,7 +1,7 @@
 //! Files. Desktop: native dialogs (`rfd`).
-//! Android: the app directory (`/sdcard/Android/data/<package>/files`) with the subdirectories
-//! `projects/`, `exports/`, `samples/`; project browser, Android picker and "Share"
-//! (see `android_files.rs`).
+//! Android: the system file picker for projects and exports, and the app directory
+//! (`/sdcard/Android/data/<package>/files`) with the subdirectories `projects/` (saved there
+//! by earlier versions), `exports/` (for "Share"), `samples/` (see `android_files.rs`).
 
 use std::path::PathBuf;
 

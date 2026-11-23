@@ -62,7 +62,7 @@ The goal is to make life easier for dawless setups **without becoming a DAW**:
 **Android**
 - Low-latency audio through Oboe/AAudio, and **USB MIDI** through the Android MidiManager.
 - Touch gestures, a full-screen mode, and layouts for tablets and phones.
-- A built-in project browser, WAV import, and sharing of exports through the Android share sheet.
+- Projects and exports are saved anywhere with the system file picker (any folder or storage it offers), and Save writes back to the same file; exports can also go to the share sheet. WAV samples are imported with the picker.
 
 **English and French UI**, picked automatically from the system language.
 

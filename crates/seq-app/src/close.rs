@@ -22,8 +22,9 @@ pub enum Step {
     Discard,
     /// Stay on the project.
     Stay,
-    /// The project name is being asked (Android, untitled): go ahead once it is saved.
-    WaitForName,
+    /// The system file picker is choosing where to save (Android: untitled, or the
+    /// document could not be written): go ahead once it is saved.
+    WaitForPicker,
 }
 
 /// The user wants to leave the project.
@@ -39,13 +40,13 @@ pub fn answer(a: Answer) -> Step {
     }
 }
 
-/// After the save started by [`Step::Save`]. `clean`: nothing left to save; `naming`: the save
-/// waits for a name (Android, untitled). A failed or cancelled save stays.
-pub fn after_save(clean: bool, naming: bool) -> Step {
+/// After the save started by [`Step::Save`]. `clean`: nothing left to save; `picking`: the save
+/// waits for the system file picker (Android). A failed or cancelled save stays.
+pub fn after_save(clean: bool, picking: bool) -> Step {
     if clean {
         Step::Proceed
-    } else if naming {
-        Step::WaitForName
+    } else if picking {
+        Step::WaitForPicker
     } else {
         Step::Stay
     }
@@ -74,7 +75,7 @@ mod tests {
         assert_eq!(after_save(true, false), Step::Proceed);
         // File dialog cancelled, or write error: the work stays open.
         assert_eq!(after_save(false, false), Step::Stay);
-        // Android, untitled: the name dialog answers later.
-        assert_eq!(after_save(false, true), Step::WaitForName);
+        // Android, untitled or document no longer writable: the file picker answers later.
+        assert_eq!(after_save(false, true), Step::WaitForPicker);
     }
 }

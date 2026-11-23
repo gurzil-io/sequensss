@@ -4,6 +4,7 @@
 #[cfg(target_os = "android")]
 mod android_files;
 mod close;
+mod document;
 pub mod files;
 mod recovery;
 mod update;
@@ -11,6 +12,7 @@ mod update;
 pub use eframe;
 pub use files::Files;
 
+use document::ProjectFile;
 use eframe::egui;
 use rtrb::RingBuffer;
 use seq_edit::{History, PatternTake, Recorder, SlotUpdate};
@@ -56,9 +58,9 @@ struct Take {
 enum Pending {
     New(usize),
     Open,
-    /// Open this file (browser or Android import).
+    /// Open this file (Android: a project of the app folder).
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-    OpenPath(PathBuf),
+    OpenFile(ProjectFile),
     /// Close the window (desktop) or leave the app (Android back button).
     Quit,
 }
@@ -66,7 +68,7 @@ enum Pending {
 /// Unsaved work shared with the Android main thread, which copies it when the app goes to
 /// the background (`None`: nothing to keep).
 #[cfg(target_os = "android")]
-type Unsaved = Arc<Mutex<Option<(Project, Option<PathBuf>)>>>;
+type Unsaved = Arc<Mutex<Option<(Project, Option<ProjectFile>)>>>;
 
 struct App {
     project: Project,
@@ -75,7 +77,7 @@ struct App {
     /// Launch splash, dropped once it has faded out.
     splash: Option<Splash>,
     hiss: Hiss,
-    file: Option<PathBuf>,
+    file: Option<ProjectFile>,
     saved: Project,
 
     audio: Option<AudioOut>,
@@ -111,7 +113,7 @@ struct App {
     recorder: Recorder,
     take: Option<Take>,
     confirm: Option<Pending>,
-    /// Android: waits for the name of an untitled project being saved before going ahead.
+    /// Android: waits for the file picker of a project being saved before going ahead.
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     after_save: Option<Pending>,
     /// Unsaved work found at launch, offered back.
@@ -128,6 +130,19 @@ struct App {
     /// Android: target channel of a WAV being picked (`Some(None)` = new channel).
     #[cfg(target_os = "android")]
     pending_sample: Option<Option<ChannelId>>,
+    /// Android: why Save could not write to the project's document (Save as… took over).
+    #[cfg(target_os = "android")]
+    save_failed: Option<String>,
+}
+
+/// Result of a save request.
+#[derive(Clone, Copy, PartialEq)]
+enum Saving {
+    /// Written, or failed (see the status line).
+    Done,
+    /// Android: the file picker is choosing where (finished in `poll_platform`).
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    Picking,
 }
 
 impl App {
@@ -139,7 +154,7 @@ impl App {
             match project_file::load(&p) {
                 Ok(pr) => {
                     project = pr;
-                    file = Some(p);
+                    file = Some(ProjectFile::Path(p));
                 }
                 Err(e) => status = trf!("Ouverture impossible : {e}", "Cannot open: {e}"),
             }
@@ -191,9 +206,13 @@ impl App {
             update_check: None,
             #[cfg(target_os = "android")]
             pending_sample: None,
+            #[cfg(target_os = "android")]
+            save_failed: None,
         };
         // Android: the soft keyboard cannot type into egui, text goes through a system dialog.
         app.ui.native_text_input = cfg!(target_os = "android");
+        // Android: exports can also go to the "Share" sheet.
+        app.ui.share_exports = cfg!(target_os = "android");
         app.show_known_update();
         app.start_update_check();
         app.refresh_devices();
@@ -604,7 +623,7 @@ impl App {
                 let Ok(u) = unsaved.lock() else { return };
                 match &*u {
                     Some((project, file)) => {
-                        if let Err(e) = recovery::write(&path, project, file.as_deref(), update::unix_now()) {
+                        if let Err(e) = recovery::write(&path, project, file.as_ref(), update::unix_now()) {
                             eprintln!("recovery: {e}");
                         }
                     }
@@ -637,7 +656,7 @@ impl App {
     /// "Restore unsaved work?" at launch.
     fn restore_dialog(&mut self, ctx: &egui::Context) {
         let Some(r) = &self.restore else { return };
-        let name = r.file.as_ref().and_then(|p| p.file_name()).map_or_else(|| tr!("Sans titre", "Untitled").into(), |f| f.to_string_lossy().to_string());
+        let name = r.file.as_ref().map_or_else(|| tr!("Sans titre", "Untitled").into(), ProjectFile::label);
         let when = recovery::ago(update::unix_now(), r.saved_at);
         let text = trf!(
             "Des modifications de « {name} » n'ont pas été enregistrées (copie gardée {when}). Les restaurer ?",
@@ -650,7 +669,7 @@ impl App {
                 if let Some(r) = self.restore.take() {
                     // Compared with its file (untitled: the project it replaces, which
                     // "Don't save" goes back to), the restored work shows as unsaved.
-                    let saved = r.file.as_deref().and_then(|f| project_file::load(f).ok()).unwrap_or_else(|| self.saved.clone());
+                    let saved = r.file.as_ref().and_then(|f| f.load().ok()).unwrap_or_else(|| self.saved.clone());
                     self.set_project(r.project, r.file);
                     self.saved = saved;
                     self.ui.status = tr!("Travail restauré", "Work restored").into();
@@ -670,15 +689,10 @@ impl App {
     // ------------------------------------------------------------------
 
     fn update_file_label(&mut self) {
-        self.ui.file_label = self
-            .file
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| tr!("Sans titre", "Untitled").into());
+        self.ui.file_label = self.file.as_ref().map_or_else(|| tr!("Sans titre", "Untitled").into(), ProjectFile::label);
     }
 
-    fn set_project(&mut self, p: Project, file: Option<PathBuf>) {
+    fn set_project(&mut self, p: Project, file: Option<ProjectFile>) {
         self.send(EngineCmd::Stop);
         self.project = p;
         self.saved = self.project.clone();
@@ -700,49 +714,63 @@ impl App {
     #[cfg(not(target_os = "android"))]
     fn do_open(&mut self) {
         let Some(path) = self.files.pick_open(tr!("Projet Sequensss", "Sequensss project"), &["ron"], tr!("projet.ron", "project.ron")) else { return };
-        self.open_path(path);
+        self.open_file(ProjectFile::Path(path));
     }
 
-    /// Android: opens the project browser.
-    #[cfg(target_os = "android")]
-    fn do_open(&mut self) {
-        self.show_browser();
-    }
-
-    fn open_path(&mut self, path: PathBuf) {
-        match project_file::load(&path) {
+    fn open_file(&mut self, file: ProjectFile) {
+        match file.load() {
             Ok(p) => {
-                self.set_project(p, Some(path));
+                self.set_project(p, Some(file));
                 self.ui.status = tr!("Projet ouvert", "Project opened").into();
             }
             Err(e) => self.ui.status = trf!("Ouverture impossible : {e}", "Cannot open: {e}"),
         }
     }
 
-    fn do_save(&mut self, save_as: bool) {
-        let path = match (&self.file, save_as) {
-            (Some(p), false) => p.clone(),
-            #[cfg(target_os = "android")]
-            _ => return self.ask_save_name(),
-            #[cfg(not(target_os = "android"))]
-            _ => {
-                let Some(p) = self.files.pick_save(tr!("Projet Sequensss", "Sequensss project"), &["ron"], tr!("projet.ron", "project.ron")) else { return };
-                if p.extension().is_none() { p.with_extension("ron") } else { p }
+    /// Save (to the project's file) or Save as…. Android: when the document can no longer be
+    /// written (permission revoked, file deleted), Save as… takes over.
+    fn do_save(&mut self, save_as: bool) -> Saving {
+        match (self.file.clone(), save_as) {
+            (Some(f), false) => {
+                #[cfg(target_os = "android")]
+                if let Err(e) = self.save_to(f) {
+                    self.ui.status = trf!("Enregistrement impossible : {e} — choisissez où enregistrer", "Cannot save: {e} — choose where to save");
+                    // Said again if the picker is cancelled (it hides the status line).
+                    self.save_failed = Some(e.to_string());
+                    return self.ask_save_as();
+                }
+                #[cfg(not(target_os = "android"))]
+                let _ = self.save_to(f);
+                Saving::Done
             }
-        };
-        self.save_to(path);
+            _ => self.ask_save_as(),
+        }
     }
 
-    fn save_to(&mut self, path: PathBuf) {
-        match project_file::save(&self.project, &path) {
+    #[cfg(not(target_os = "android"))]
+    fn ask_save_as(&mut self) -> Saving {
+        if let Some(p) = self.files.pick_save(tr!("Projet Sequensss", "Sequensss project"), &["ron"], tr!("projet.ron", "project.ron")) {
+            let p = if p.extension().is_none() { p.with_extension("ron") } else { p };
+            let _ = self.save_to(ProjectFile::Path(p));
+        }
+        Saving::Done
+    }
+
+    /// Writes the project to `file`, which becomes its file.
+    fn save_to(&mut self, file: ProjectFile) -> seq_io::Result<()> {
+        match file.save(&self.project) {
             Ok(()) => {
                 self.saved = self.project.clone();
-                self.file = Some(path);
+                self.file = Some(file);
                 self.update_file_label();
                 self.remove_recovery();
                 self.ui.status = tr!("Enregistré", "Saved").into();
+                Ok(())
             }
-            Err(e) => self.ui.status = trf!("Enregistrement impossible : {e}", "Cannot save: {e}"),
+            Err(e) => {
+                self.ui.status = trf!("Enregistrement impossible : {e}", "Cannot save: {e}");
+                Err(e)
+            }
         }
     }
 
@@ -754,11 +782,12 @@ impl App {
     fn do_export_wav(&mut self) {
         let Some(path) = self.files.pick_save("WAV", &["wav"], "export.wav") else { return };
         let path = if path.extension().is_none() { path.with_extension("wav") } else { path };
-        self.export_wav_to(&path);
+        self.export_wav_to(&path, &path.display().to_string());
     }
 
-    /// Offline render to `path`. Returns `true` if the file was written.
-    fn export_wav_to(&mut self, path: &std::path::Path) -> bool {
+    /// Offline render to `path` (`shown`: where it goes, for the status line). Returns `true`
+    /// if the file was written.
+    fn export_wav_to(&mut self, path: &std::path::Path, shown: &str) -> bool {
         let sr = if self.audio.is_some() { self.sample_rate } else { EXPORT_SR };
         // Synchronous: every sample is needed (waits for the ones loading in the background).
         let mut slots = Vec::new();
@@ -774,7 +803,7 @@ impl App {
             Ok(()) => {
                 let what = if mode == PlayMode::Song { tr!("morceau", "song") } else { tr!("pattern courant", "current pattern") };
                 let secs = audio.len() as f64 / 2.0 / sr as f64;
-                self.ui.status = trf!("Export WAV ({what}, {secs:.1} s) : {}", "WAV export ({what}, {secs:.1} s): {}", path.display());
+                self.ui.status = trf!("Export WAV ({what}, {secs:.1} s) : {shown}", "WAV export ({what}, {secs:.1} s): {shown}");
                 true
             }
             Err(e) => {
@@ -788,13 +817,13 @@ impl App {
     fn do_export_midi(&mut self) {
         let Some(path) = self.files.pick_save("MIDI", &["mid"], "export.mid") else { return };
         let path = if path.extension().is_none() { path.with_extension("mid") } else { path };
-        self.export_midi_to(&path);
+        self.export_midi_to(&path, &path.display().to_string());
     }
 
-    fn export_midi_to(&mut self, path: &std::path::Path) -> bool {
+    fn export_midi_to(&mut self, path: &std::path::Path, shown: &str) -> bool {
         match export::write_midi(path, &self.project, self.ui.pattern) {
             Ok(()) => {
-                self.ui.status = trf!("Export MIDI : {}", "MIDI export: {}", path.display());
+                self.ui.status = trf!("Export MIDI : {shown}", "MIDI export: {shown}");
                 true
             }
             Err(e) => {
@@ -855,8 +884,12 @@ impl App {
             UiAction::Preview { channel, key, vel, on } => self.send(EngineCmd::Preview { channel, key, vel, on }),
             UiAction::NewProject(k) => self.answer(ctx, Pending::New(k), close::request(self.is_dirty())),
             UiAction::Open => self.answer(ctx, Pending::Open, close::request(self.is_dirty())),
-            UiAction::Save => self.do_save(false),
-            UiAction::SaveAs => self.do_save(true),
+            UiAction::Save => {
+                self.do_save(false);
+            }
+            UiAction::SaveAs => {
+                self.do_save(true);
+            }
             UiAction::ExportWav => self.do_export_wav(),
             UiAction::ExportMidi => self.do_export_midi(),
             UiAction::Undo => {
@@ -910,16 +943,18 @@ impl App {
             a @ (UiAction::BrowserOpen(_)
             | UiAction::BrowserShare(_)
             | UiAction::BrowserDelete(_)
-            | UiAction::BrowserSaveAs
-            | UiAction::BrowserImport
+            | UiAction::BrowserPickFile
+            | UiAction::ShareWav
+            | UiAction::ShareMidi
             | UiAction::AskName(..)) => self.browser_action(ctx, a),
-            // Desktop: native dialogs, no browser; text is typed in the app.
+            // Desktop: native dialogs, no browser nor share sheet; text is typed in the app.
             #[cfg(not(target_os = "android"))]
             UiAction::BrowserOpen(_)
             | UiAction::BrowserShare(_)
             | UiAction::BrowserDelete(_)
-            | UiAction::BrowserSaveAs
-            | UiAction::BrowserImport
+            | UiAction::BrowserPickFile
+            | UiAction::ShareWav
+            | UiAction::ShareMidi
             | UiAction::AskName(..) => {}
         }
     }
@@ -930,7 +965,7 @@ impl App {
         let name = &self.ui.file_label;
         let text = match pending {
             Pending::New(_) => trf!("Enregistrer les modifications de « {name} » avant de créer un nouveau projet ?", "Save changes to “{name}” before creating a new project?"),
-            Pending::Open | Pending::OpenPath(_) => trf!("Enregistrer les modifications de « {name} » avant d'ouvrir un projet ?", "Save changes to “{name}” before opening a project?"),
+            Pending::Open | Pending::OpenFile(_) => trf!("Enregistrer les modifications de « {name} » avant d'ouvrir un projet ?", "Save changes to “{name}” before opening a project?"),
             Pending::Quit => trf!("Enregistrer les modifications de « {name} » ?", "Save changes to “{name}”?"),
         };
         let buttons = [
@@ -963,13 +998,12 @@ impl App {
                 self.proceed(ctx, pending);
             }
             close::Step::Save => {
-                // Android, untitled: the name is asked in a system dialog (see `poll_platform`).
-                let naming = cfg!(target_os = "android") && self.file.is_none();
-                self.do_save(false);
-                let next = close::after_save(!self.is_dirty(), naming);
+                // Android, untitled: the file picker answers later (see `poll_platform`).
+                let picking = self.do_save(false) == Saving::Picking;
+                let next = close::after_save(!self.is_dirty(), picking);
                 self.answer(ctx, pending, next);
             }
-            close::Step::WaitForName => self.after_save = Some(pending),
+            close::Step::WaitForPicker => self.after_save = Some(pending),
             close::Step::Stay => {}
         }
     }
@@ -978,7 +1012,7 @@ impl App {
         match pending {
             Pending::New(k) => self.do_new(k),
             Pending::Open => self.do_open(),
-            Pending::OpenPath(p) => self.open_path(p),
+            Pending::OpenFile(f) => self.open_file(f),
             Pending::Quit => self.quit(ctx),
         }
     }
@@ -1111,7 +1145,7 @@ impl eframe::App for App {
             return; // still offered at the next launch
         }
         if self.is_dirty() && !self.closing {
-            if let Err(e) = recovery::write(&path, &self.project, self.file.as_deref(), update::unix_now()) {
+            if let Err(e) = recovery::write(&path, &self.project, self.file.as_ref(), update::unix_now()) {
                 eprintln!("recovery: {e}");
             }
         } else {

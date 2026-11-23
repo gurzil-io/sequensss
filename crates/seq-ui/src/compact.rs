@@ -149,7 +149,11 @@ impl SeqUi {
                 }
             }
             skin::menu_separator(ui);
-            for (label, a) in [(tr!("Exporter en WAV", "Export WAV"), UiAction::ExportWav), (tr!("Exporter en MIDI", "Export MIDI"), UiAction::ExportMidi)] {
+            let mut exports = vec![(tr!("Exporter en WAV…", "Export WAV…"), UiAction::ExportWav), (tr!("Exporter en MIDI…", "Export MIDI…"), UiAction::ExportMidi)];
+            if self.share_exports {
+                exports.extend([(tr!("Partager en WAV", "Share as WAV"), UiAction::ShareWav), (tr!("Partager en MIDI", "Share as MIDI"), UiAction::ShareMidi)]);
+            }
+            for (label, a) in exports {
                 if skin::menu_item(ui, label, pal().text, false).clicked() {
                     chosen = Some(a);
                 }

@@ -17,9 +17,21 @@ class MainActivity : GameActivity() {
         }
     }
 
-    /** Document picker (registered before onCreate, as the API requires). */
+    // Document pickers (registered before onCreate, as the API requires).
+
+    /** A file to copy into the app folder (samples). */
     val openDocument = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         PlatformBridge.onPicked(this, uri)
+    }
+
+    /** A document to use where it is (projects). */
+    val openInPlace = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        PlatformBridge.onDocument(this, uri)
+    }
+
+    /** A new document: the user chooses the folder and the name (Save as…, exports). */
+    val createDocument = registerForActivityResult(PlatformBridge.CreateDocument()) { uri ->
+        PlatformBridge.onDocument(this, uri)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

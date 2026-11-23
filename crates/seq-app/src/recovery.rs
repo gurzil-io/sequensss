@@ -4,8 +4,9 @@
 //! discarded.
 //!
 //! A project file whose first line, a RON comment, says when it was written and which file
-//! the project belongs to.
+//! the project belongs to (a path, or an Android document URI and its name).
 
+use crate::document::ProjectFile;
 use seq_i18n::{tr, trf};
 use seq_io::project_file;
 use seq_model::Project;
@@ -19,17 +20,25 @@ const HEADER: &str = "// sequensss-recovery ";
 pub struct Recovery {
     pub project: Project,
     /// The project's own file (`None`: untitled).
-    pub file: Option<PathBuf>,
+    pub file: Option<ProjectFile>,
     /// When the copy was written (Unix seconds).
     pub saved_at: u64,
 }
 
 /// Writes the copy (atomically: an interrupted write leaves the previous one).
-pub fn write(path: &Path, project: &Project, file: Option<&Path>, saved_at: u64) -> seq_io::Result<()> {
+pub fn write(path: &Path, project: &Project, file: Option<&ProjectFile>, saved_at: u64) -> seq_io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let meta = serde_json::json!({ "saved_at": saved_at, "file": file.map(|f| f.to_string_lossy()) });
+    let mut meta = serde_json::json!({ "saved_at": saved_at });
+    match file {
+        Some(ProjectFile::Path(p)) => meta["file"] = p.to_string_lossy().into(),
+        Some(ProjectFile::Uri { uri, name }) => {
+            meta["uri"] = uri.as_str().into();
+            meta["name"] = name.as_str().into();
+        }
+        None => meta["file"] = serde_json::Value::Null,
+    }
     let text = format!("{HEADER}{meta}\n{}", project_file::to_text(project)?);
     project_file::write_atomic(path, &text)
 }
@@ -46,7 +55,11 @@ pub fn read(path: &Path) -> Option<Recovery> {
         .unwrap_or_default();
     Some(Recovery {
         project,
-        file: meta["file"].as_str().map(PathBuf::from),
+        file: match (meta["file"].as_str(), meta["uri"].as_str()) {
+            (Some(f), _) => Some(ProjectFile::Path(PathBuf::from(f))),
+            (None, Some(uri)) => Some(ProjectFile::Uri { uri: uri.to_string(), name: meta["name"].as_str().unwrap_or_default().to_string() }),
+            (None, None) => None,
+        },
         saved_at: meta["saved_at"].as_u64().unwrap_or(0),
     })
 }
@@ -92,6 +105,7 @@ mod tests {
         p.tempo_bpm = 97.0;
         let file = dir.join("my \"song\"\nv2.ron");
         // Creates the directory.
+        let file = ProjectFile::Path(file);
         write(&path, &p, Some(&file), 1_700_000_000).unwrap();
         assert_eq!(read(&path), Some(Recovery { project: p.clone(), file: Some(file), saved_at: 1_700_000_000 }));
         // Still an ordinary project file.
@@ -108,6 +122,20 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(read(&path), None);
         // Removing twice is fine.
+        remove(&path);
+    }
+
+    #[test]
+    fn android_document_keeps_its_uri_and_name() {
+        let dir = tmp_dir("uri");
+        let path = dir.join(FILE_NAME);
+        let file = ProjectFile::Uri { uri: "content://com.android.externalstorage.documents/document/primary%3ADocuments%2FT.ron".into(), name: "T “1”.ron".into() };
+        write(&path, &Project::from_kit(3), Some(&file), 42).unwrap();
+        assert_eq!(read(&path), Some(Recovery { project: Project::from_kit(3), file: Some(file), saved_at: 42 }));
+        // Copy written before documents existed (path only), still read.
+        let old = format!("{HEADER}{{\"saved_at\":7,\"file\":\"/x/old.ron\"}}\n{}", project_file::to_text(&Project::from_kit(0)).unwrap());
+        std::fs::write(&path, old).unwrap();
+        assert_eq!(read(&path).unwrap().file, Some(ProjectFile::Path(PathBuf::from("/x/old.ron"))));
         remove(&path);
     }
 

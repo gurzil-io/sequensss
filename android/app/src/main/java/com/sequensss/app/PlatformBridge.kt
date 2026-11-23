@@ -1,6 +1,8 @@
 package com.sequensss.app
 
+import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -9,6 +11,7 @@ import android.util.Log
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.core.content.FileProvider
 import java.io.File
 import java.lang.ref.WeakReference
@@ -16,11 +19,12 @@ import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * Android services for the Rust code (crates/seq-io/src/platform_android.rs):
- * file picker, text input dialog, sharing, web links, back button, leaving the app,
- * going to the background.
+ * file picker, documents (Storage Access Framework), text input dialog, sharing, web links,
+ * back button, leaving the app, going to the background.
  *
- * Operations are asynchronous: the result goes into a queue that Rust reads every
- * frame (`takeResult`), as "kind\nvalue" ("kind\n" alone = cancelled).
+ * Dialogs are asynchronous: the result goes into a queue that Rust reads every
+ * frame (`takeResult`), as "kind\nvalue" ("kind\n" alone = cancelled). Documents are read
+ * and written synchronously, on the Rust thread that asks.
  */
 object PlatformBridge {
     private const val TAG = "sequensss"
@@ -31,8 +35,18 @@ object PlatformBridge {
     @Volatile private var pickKind = ""
     @Volatile private var pickDir = ""
 
+    /** Kind of the pending document picker (one at a time), and whether to keep its permission. */
+    @Volatile private var docKind = ""
+    @Volatile private var docKeep = false
+
+    /** Persisted document permissions kept at most (Android caps them; the oldest go first). */
+    private const val MAX_KEPT = 100
+
+    private var appContext: Context? = null
+
     fun init(a: MainActivity) {
         activity = WeakReference(a)
+        appContext = a.applicationContext
     }
 
     @JvmStatic fun takeResult(): String? = results.poll()
@@ -78,6 +92,135 @@ object PlatformBridge {
             }
         }.start()
     }
+
+    /** ACTION_CREATE_DOCUMENT with a MIME type chosen per call: input = (suggested name, MIME). */
+    class CreateDocument : ActivityResultContract<Pair<String, String>, Uri?>() {
+        override fun createIntent(context: Context, input: Pair<String, String>): Intent =
+            Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType(input.second)
+                .putExtra(Intent.EXTRA_TITLE, input.first)
+
+        override fun parseResult(resultCode: Int, intent: Intent?): Uri? =
+            if (resultCode == Activity.RESULT_OK) intent?.data else null
+    }
+
+    /** Picker for a document to use where it is; its URI is returned. */
+    @JvmStatic fun openDocument(kind: String, mimes: Array<String>, keep: Boolean) {
+        val a = activity?.get() ?: return post(kind, null)
+        docKind = kind
+        docKeep = keep
+        a.runOnUiThread {
+            try {
+                a.openInPlace.launch(mimes)
+            } catch (e: Exception) {
+                Log.w(TAG, "openDocument: $e")
+                post(kind, null)
+            }
+        }
+    }
+
+    /** Picker for a new document (folder and name chosen by the user); its URI is returned. */
+    @JvmStatic fun createDocument(kind: String, name: String, mime: String, keep: Boolean) {
+        val a = activity?.get() ?: return post(kind, null)
+        docKind = kind
+        docKeep = keep
+        a.runOnUiThread {
+            try {
+                a.createDocument.launch(Pair(name, mime))
+            } catch (e: Exception) {
+                Log.w(TAG, "createDocument: $e")
+                post(kind, null)
+            }
+        }
+    }
+
+    /** Called by MainActivity with the chosen document (null = cancelled). */
+    fun onDocument(a: MainActivity, uri: Uri?) {
+        val kind = docKind
+        if (uri == null) return post(kind, null)
+        if (docKeep) keepPermission(a, uri)
+        post(kind, uri.toString())
+    }
+
+    /** Keeps the read / write permission across restarts, so Save can write back later. */
+    private fun keepPermission(a: MainActivity, uri: Uri) {
+        val cr = a.contentResolver
+        val rw = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        try {
+            cr.takePersistableUriPermission(uri, rw)
+        } catch (e: SecurityException) {
+            // Read-only document: Save will fall back to Save as….
+            try {
+                cr.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (e2: SecurityException) {
+                Log.w(TAG, "permission: $e2")
+            }
+        }
+        // Forget the oldest documents beyond the limit.
+        val kept = cr.persistedUriPermissions
+        if (kept.size > MAX_KEPT) {
+            kept.sortedBy { it.persistedTime }.take(kept.size - MAX_KEPT).filter { it.uri != uri }.forEach {
+                val flags = (if (it.isReadPermission) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or
+                    (if (it.isWritePermission) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
+                try {
+                    cr.releasePersistableUriPermission(it.uri, flags)
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "release: $e")
+                }
+            }
+        }
+    }
+
+    private fun resolver() = (activity?.get() ?: appContext)?.contentResolver
+
+    /** Display name of a document, if its provider gives one. */
+    @JvmStatic fun displayName(uri: String): String? = try {
+        resolver()?.query(Uri.parse(uri), arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "displayName: $e")
+        null
+    }
+
+    /** Text of a document: "ok:<text>" or "error:<message>". */
+    @JvmStatic fun readText(uri: String): String = try {
+        val cr = resolver() ?: throw IllegalStateException("no activity")
+        val text = cr.openInputStream(Uri.parse(uri)).use { it!!.readBytes() }.toString(Charsets.UTF_8)
+        "ok:$text"
+    } catch (e: Exception) {
+        Log.w(TAG, "readText: $e")
+        "error:" + message(e)
+    }
+
+    /** Replaces the contents of a document. Returns null, or the error. */
+    @JvmStatic fun writeText(uri: String, text: String): String? = write(uri) { it.write(text.toByteArray(Charsets.UTF_8)) }
+
+    /** Copies one of the app's files into a document. Returns null, or the error. */
+    @JvmStatic fun copyToUri(path: String, uri: String): String? = write(uri) { out ->
+        File(path).inputStream().use { it.copyTo(out) }
+    }
+
+    private fun write(uri: String, body: (java.io.OutputStream) -> Unit): String? = try {
+        val cr = resolver() ?: throw IllegalStateException("no activity")
+        val u = Uri.parse(uri)
+        // "wt" truncates what was there; some providers only know "w".
+        val out = try {
+            cr.openOutputStream(u, "wt")
+        } catch (e: IllegalArgumentException) {
+            cr.openOutputStream(u, "w")
+        } catch (e: java.io.FileNotFoundException) {
+            cr.openOutputStream(u, "w")
+        } ?: throw java.io.FileNotFoundException(uri)
+        out.use(body)
+        null
+    } catch (e: Exception) {
+        Log.w(TAG, "write: $e")
+        message(e)
+    }
+
+    private fun message(e: Exception): String = e.localizedMessage ?: e.javaClass.simpleName
 
     private fun displayName(a: MainActivity, uri: Uri): String {
         var name: String? = null
